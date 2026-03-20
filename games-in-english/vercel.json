@@ -1,0 +1,20 @@
+{
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "buildCommand": "npm run build",
+        "outputDirectory": "dist/public"
+      }
+    }
+  ],
+  "outputDirectory": "dist/public",
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/api/auth/(.*)", "dest": "https://meh-auth.up.railway.app/api/auth/$1" },
+    { "src": "/api/user",      "dest": "https://meh-auth.up.railway.app/api/user" },
+    { "src": "/api/notifications(.*)", "dest": "https://meh-auth.up.railway.app/api/notifications$1" },
+    { "src": "/api/(.*)",      "dest": "https://games-ie.up.railway.app/api/$1" }
+  ]
+}
