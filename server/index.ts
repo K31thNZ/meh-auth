@@ -86,7 +86,7 @@ app.get("/login", (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign in — MEH Moscow</title>
+  <title>Sign in</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #FFFCF7; min-height: 100vh;
@@ -114,7 +114,7 @@ app.get("/login", (req, res) => {
 </head>
 <body>
 <div class="card">
-  <h1>MEH Moscow</h1>
+  <h1>Welcome</h1>
   <p>Sign in to continue</p>
 
   <a href="${authUrl}/api/auth/google?returnTo=${returnTo}" class="btn">
