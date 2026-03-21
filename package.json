@@ -4,8 +4,7 @@
   "type": "module",
   "scripts": {
     "dev":       "NODE_ENV=development tsx server/index.ts",
-    "build": "esbuild server/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:pg-native --external:cpu-features --external:passport-yandex --external:connect-pg-simple"    "start":     "NODE_ENV=production node dist/index.cjs",
-    "db:push":   "drizzle-kit push",
+    "build": "esbuild server/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:pg-native --external:cpu-features --external:passport-yandex --external:connect-pg-simple"    "db:push":   "drizzle-kit push",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
