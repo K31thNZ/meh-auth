@@ -1,10 +1,13 @@
 // server/index.ts
+import { initBot } from "./bot";
+import { scheduleMatcher } from "./matcher";
+import { registerNotifyRoutes } from "./notify-routes";
 import express from "express";
 import cors from "cors";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 import pg from "pg";
-import { setupPassport, registerAuthRoutes } from "./auth";
+import { setupPassport, registerAuthRoutes } from "./auth";registerNotifyRoutes(app);
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -193,4 +196,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[meh-auth] Running on port ${PORT} (${process.env.NODE_ENV ?? "development"})`);
   console.log(`[meh-auth] Cookie domain: ${process.env.COOKIE_DOMAIN ?? "not set (single-domain mode)"}`);
   console.log(`[meh-auth] Allowed origins: ${process.env.ALLOWED_ORIGINS ?? "none set"}`);
+  initBot();
+  scheduleMatcher();
 });
