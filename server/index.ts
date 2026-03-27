@@ -7,7 +7,7 @@ import cors from "cors";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 import pg from "pg";
-import { setupPassport, registerAuthRoutes } from "./auth";registerNotifyRoutes(app);
+import { setupPassport, registerAuthRoutes } from "./auth";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -183,6 +183,9 @@ document.getElementById("login-form").addEventListener("submit", async e => {
 </body>
 </html>`);
 });
+
+// ── Notify routes (must come after app is fully defined) ──────────────────
+registerNotifyRoutes(app);
 
 // ── Global error handler ──────────────────────────────────────────────────
 app.use((err: any, _req: any, res: any, _next: any) => {
