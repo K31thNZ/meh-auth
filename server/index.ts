@@ -265,7 +265,7 @@ app.get("/login", (req, res) => {
 </head>
 <body>
 <div class="card">
-  <h1>ExpatEvents</h1>
+  <a href="/" class="flex items-center gap-2 group"><div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/20 group-hover:scale-105 transition-transform"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-ticket w-5 h-5 text-white"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"></path><path d="M13 5v2"></path><path d="M13 17v2"></path><path d="M13 11v2"></path></svg></div><span class="font-display font-bold text-2xl tracking-tight text-foreground">Expat<span class="text-primary">Events</span></span></a>
   <p class="subtitle">Sign in to continue</p>
 
   <!-- Step 1: Email -->
