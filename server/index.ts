@@ -189,11 +189,11 @@ app.get("/login", (req, res) => {
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-      background: #111; min-height: 100vh;
+      background: #FFFCF7; min-height: 100vh;
       display: flex; align-items: center; justify-content: center; padding: 16px;
     }
     .card {
-      background: #1a1a1a; border-radius: 24px;
+      background: white; border-radius: 24px;
       padding: 36px 28px 28px; width: 100%; max-width: 400px;
       box-shadow: 0 24px 64px rgba(0,0,0,0.6);
     }
@@ -203,7 +203,7 @@ app.get("/login", (req, res) => {
       display: flex; align-items: center; justify-content: center;
       margin: 0 auto 20px; font-size: 26px;
     }
-    h1 { font-size: 22px; font-weight: 700; color: #fff; text-align: center; margin-bottom: 6px; }
+    h1 { font-size: 22px; font-weight: 600; color: #2C2C2A; margin-bottom: 4px; text-align: center; }
     .subtitle { font-size: 14px; color: #888; text-align: center; margin-bottom: 28px; }
     .field-label {
       font-size: 11px; font-weight: 500; color: #666;
@@ -265,9 +265,8 @@ app.get("/login", (req, res) => {
 </head>
 <body>
 <div class="card">
-  <div class="logo">🗺️</div>
   <h1>ExpatEvents</h1>
-  <p class="subtitle">Sign in to discover events in Moscow</p>
+  <p class="subtitle">Sign in to continue</p>
 
   <!-- Step 1: Email -->
   <div id="email-step">
