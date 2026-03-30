@@ -14,7 +14,7 @@ ALLOWED_ORIGINS = "https://expatevents.org,https://event-hub-nrgx.onrender.com,h
 COOKIE_DOMAIN = ".expatevents.org"
 AUTH_SERVICE_URL = "https://auth.expatevents.org"
 ADMIN_TELEGRAM_ID = "982149637"
-DATABASE_URL = "postgresql://neondb_owner:npg_4nMsVqh3gWux@ep-morning-moon-agh0t8v5-pooler.c-2.eu-central-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require"
+DATABASE_URL = "postgresql://neondb_owner:npg_knRWGAu3oft0@ep-cold-bird-agauwq3h-pooler.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 GOOGLE_CLIENT_ID = "902332665557-0t89dbagkl276mhhcb0n904phh3qc43c.apps.googleusercontent.com"
 RESEND_API_KEY = "re_NaULCzzQ_CVFEpmxDThchL6NayT1cqSJx"
 TELEGRAM_BOT_TOKEN = "8745167732:AAFB4Ze80jMKWFQ9LdTIwMOb5GWi1v_ml48"
