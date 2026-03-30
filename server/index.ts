@@ -1,3 +1,4 @@
+import { registerMagicCodeRoutes } from "./magic-code";
 import { initBot } from "./bot";
 import { scheduleMatcher } from "./matcher";
 import { registerNotifyRoutes } from "./notify-routes";
@@ -449,8 +450,6 @@ document.addEventListener("keydown", e => {
 </body>
 </html>`);
 });
-
-import { registerMagicCodeRoutes } from "./magic-code";
 // ...
 registerMagicCodeRoutes(app);
 // ── Notify routes ─────────────────────────────────────────────────────────
