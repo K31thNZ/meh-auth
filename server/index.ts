@@ -221,7 +221,7 @@ app.get("/login", (req, res) => {
     .btn-primary {
       width: 100%; padding: 13px; background: white;
       border: none; border-radius: 12px;
-      font-size: 15px; font-weight: 600; color: #0f0f0f;
+      font-size: 15px; font-weight: 600; color: #2c2c2a;
       cursor: pointer; margin-bottom: 10px; transition: background 0.15s;
     }
     .btn-primary:hover { background: #bef264; }
