@@ -1,4 +1,4 @@
-modules = ["nodejs-20"]
+modules = ["nodejs-20", "postgresql-16"]
 [agent]
 expertMode = true
 
@@ -10,9 +10,15 @@ channel = "stable-25_05"
 [userenv.shared]
 PORT = "5000"
 NODE_ENV = "development"
-ALLOWED_ORIGINS = ""
-COOKIE_DOMAIN = ""
-AUTH_SERVICE_URL = ""
+ALLOWED_ORIGINS = "https://expatevents.org,https://event-hub-nrgx.onrender.com,https://games-rw9l.onrender.com"
+COOKIE_DOMAIN = ".expatevents.org"
+AUTH_SERVICE_URL = "https://auth.expatevents.org"
+ADMIN_TELEGRAM_ID = "982149637"
+DATABASE_URL = "postgresql://neondb_owner:npg_4nMsVqh3gWux@ep-morning-moon-agh0t8v5-pooler.c-2.eu-central-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require"
+GOOGLE_CLIENT_ID = "902332665557-0t89dbagkl276mhhcb0n904phh3qc43c.apps.googleusercontent.com"
+RESEND_API_KEY = "re_NaULCzzQ_CVFEpmxDThchL6NayT1cqSJx"
+TELEGRAM_BOT_TOKEN = "8745167732:AAFB4Ze80jMKWFQ9LdTIwMOb5GWi1v_ml48"
+YANDEX_CLIENT_ID = "81cd955f78bb4aaa980ffba9ce040d9b"
 
 [workflows]
 runButton = "Project"
