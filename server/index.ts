@@ -211,7 +211,7 @@ app.get("/login", (req, res) => {
     }
     input {
       width: 100%; padding: 13px 14px;
-      background: #262626; border: 1.5px solid #333;
+      background: white; border: 1.5px solid #333;
       border-radius: 12px; color: #fff; font-size: 15px;
       outline: none; transition: border-color 0.15s; margin-bottom: 12px;
     }
