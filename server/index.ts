@@ -212,7 +212,7 @@ app.get("/login", (req, res) => {
     input {
       width: 100%; padding: 13px 14px;
       background: white; border: 1.5px solid #333;
-      border-radius: 12px; color: #fff; font-size: 15px;
+      border-radius: 12px; color: #00000; font-size: 15px;
       outline: none; transition: border-color 0.15s; margin-bottom: 12px;
     }
     input::placeholder { color: #555; }
@@ -221,7 +221,7 @@ app.get("/login", (req, res) => {
     .btn-primary {
       width: 100%; padding: 13px; background: white;
       border: none; border-radius: 12px;
-      font-size: 15px; font-weight: 600; color: #fff;
+      font-size: 15px; font-weight: 600; color: #00000;
       cursor: pointer; margin-bottom: 10px;
     }
     .btn-primary:hover { background: #bef264; }
