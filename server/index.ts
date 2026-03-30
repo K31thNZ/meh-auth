@@ -224,13 +224,17 @@ app.get("/login", (req, res) => {
       font-size: 15px; font-weight: 600; color: #00000;
       cursor: pointer; margin-bottom: 10px;
     }
-    .btn-primary:hover { background: #bef264; }
+    .btn-primary:hover { background: hsl(var
+346 80% 52%
+(--primary); }
     .btn-ghost {
       width: 100%; padding: 11px; background: transparent; border: none;
       font-size: 14px; font-weight: 500; color: #a3e635;
       cursor: pointer; transition: color 0.15s;
     }
-    .btn-ghost:hover { color: #bef264; }
+    .btn-ghost:hover { color: hsl(var
+346 80% 52%
+(--primary); }
     .divider {
       display: flex; align-items: center; gap: 10px;
       margin: 20px 0; font-size: 12px; color: #555;
