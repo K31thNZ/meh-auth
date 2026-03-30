@@ -450,11 +450,9 @@ document.addEventListener("keydown", e => {
 </html>`);
 });
 
-// ── Magic code stub (returns 501 until email provider is added) ───────────
-app.post("/api/auth/magic-code", (_req, res) => {
-  res.status(501).json({ error: "Email sign-in not yet configured" });
-});
-
+import { registerMagicCodeRoutes } from "./magic-code";
+// ...
+registerMagicCodeRoutes(app);
 // ── Notify routes ─────────────────────────────────────────────────────────
 registerNotifyRoutes(app);
 
