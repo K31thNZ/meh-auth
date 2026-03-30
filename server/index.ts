@@ -13,6 +13,10 @@ const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const PgSession = connectPg(session);
 
+// The pg driver doesn't support channel_binding=require (Neon includes it) — strip it
+const dbConString = (process.env.DATABASE_URL ?? "")
+  .replace(/[&?]channel_binding=[^&]*/g, "");
+
 app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "")
@@ -34,9 +38,14 @@ app.use(express.urlencoded({ extended: true }));
 
 const cookieDomain = process.env.COOKIE_DOMAIN || undefined;
 
+const sessionPool = new pg.Pool({
+  connectionString: dbConString,
+  ssl: { rejectUnauthorized: false },
+});
+
 app.use(session({
   store: new PgSession({
-    conString: process.env.DATABASE_URL,
+    pool: sessionPool,
     tableName: "sessions",
     createTableIfMissing: true,
   }),
