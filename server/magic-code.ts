@@ -11,7 +11,12 @@ import { users } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { storage } from "./storage";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resend: Resend | null = null;
+function getResend(): Resend | null {
+  if (!process.env.RESEND_API_KEY) return null;
+  if (!resend) resend = new Resend(process.env.RESEND_API_KEY);
+  return resend;
+}
 const FROM_EMAIL = "noreply@expatevents.org";
 const CODE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -61,8 +66,13 @@ export function registerMagicCodeRoutes(app: Express) {
     });
 
     // Send email via Resend
+    const resendClient = getResend();
+    if (!resendClient) {
+      codeStore.delete(normalizedEmail);
+      return res.status(501).json({ error: "Email sign-in not configured. Please use Google, Yandex, or password." });
+    }
     try {
-      await resend.emails.send({
+      await resendClient.emails.send({
         from: FROM_EMAIL,
         to: normalizedEmail,
         subject: "Your ExpatEvents sign-in code",
