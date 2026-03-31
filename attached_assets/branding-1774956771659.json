@@ -1,0 +1,119 @@
+{
+  "colorScheme": "light",
+  "fonts": [
+    {
+      "family": "Plus Jakarta Sans",
+      "role": "body"
+    },
+    {
+      "family": "Playfair Display",
+      "role": "heading"
+    }
+  ],
+  "colors": {
+    "primary": "#E72350",
+    "secondary": "#9CA3AF",
+    "accent": "#E72350",
+    "background": "#FCFAF8",
+    "textPrimary": "#251D18",
+    "link": "#7E6F67"
+  },
+  "typography": {
+    "fontFamilies": {
+      "primary": "Plus Jakarta Sans",
+      "heading": "Playfair Display"
+    },
+    "fontStacks": {
+      "heading": [
+        "Playfair Display",
+        "serif"
+      ],
+      "body": [
+        "Plus Jakarta Sans",
+        "sans-serif"
+      ],
+      "paragraph": [
+        "Plus Jakarta Sans",
+        "sans-serif"
+      ]
+    },
+    "fontSizes": {
+      "h1": "72px",
+      "h2": "36px",
+      "body": "20px"
+    }
+  },
+  "spacing": {
+    "baseUnit": 4,
+    "borderRadius": "6px"
+  },
+  "components": {
+    "input": {
+      "background": "transparent",
+      "textColor": "#251D18",
+      "borderColor": null,
+      "borderRadius": "9999px",
+      "borderRadiusCorners": {
+        "topLeft": "9999px",
+        "topRight": "9999px",
+        "bottomRight": "9999px",
+        "bottomLeft": "9999px"
+      },
+      "shadow": "none"
+    }
+  },
+  "images": {
+    "favicon": "https://expatevents.org/favicon.png",
+    "ogImage": null
+  },
+  "__llm_logo_reasoning": {
+    "selectedIndex": -1,
+    "reasoning": "The only logo candidate is tiny and likely an icon rather than a main brand logo. It does not prominently represent the brand 'ExpatEvents'.",
+    "confidence": 0.3,
+    "rejected": true,
+    "source": "llm"
+  },
+  "__llm_button_reasoning": {
+    "primary": {
+      "index": -1,
+      "text": "N/A",
+      "reasoning": "The detected button does not have a vibrant or brand-specific color that typically indicates a primary CTA. It shares the same background color as the page, making it less prominent."
+    },
+    "secondary": {
+      "index": -1,
+      "text": "N/A",
+      "reasoning": "There is only one button detected, and it does not have a different background color from the primary button."
+    },
+    "confidence": 0.8
+  },
+  "personality": {
+    "tone": "modern",
+    "energy": "medium",
+    "targetAudience": "expatriates and event-goers"
+  },
+  "designSystem": {
+    "framework": "tailwind",
+    "componentLibrary": ""
+  },
+  "confidence": {
+    "buttons": 0.8,
+    "colors": 0.9,
+    "overall": 0.8500000000000001
+  },
+  "__llm_metadata": {
+    "logoSelection": {
+      "llmCalled": true,
+      "llmSucceeded": true,
+      "finalSource": "llm",
+      "rawLogoSelection": {
+        "selectedLogoIndex": -1,
+        "selectedLogoReasoning": "The only logo candidate is tiny and likely an icon rather than a main brand logo. It does not prominently represent the brand 'ExpatEvents'.",
+        "confidence": 0.3
+      }
+    },
+    "buttonClassification": {
+      "llmCalled": true,
+      "llmSucceeded": true
+    }
+  }
+}

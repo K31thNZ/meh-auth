@@ -10,7 +10,7 @@ channel = "stable-25_05"
 [userenv.shared]
 PORT = "5000"
 NODE_ENV = "development"
-ALLOWED_ORIGINS = "https://expatevents.org,https://event-hub-nrgx.onrender.com,https://games-rw9l.onrender.com"
+ALLOWED_ORIGINS = "https://expatevents.org,https://event-hub-nrgx.onrender.com,https://games-rw9l.onrender.com,https://02035f2b-13af-48c0-b11e-856ce1c4339d-00-1yv8ejztujn3l.kirk.replit.dev"
 COOKIE_DOMAIN = ".expatevents.org"
 AUTH_SERVICE_URL = "https://auth.expatevents.org"
 ADMIN_TELEGRAM_ID = "982149637"
