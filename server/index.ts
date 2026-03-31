@@ -115,7 +115,6 @@ app.get("/terms", (_req, res) => {
   <style>${BRAND_DOC_CSS}</style>
 </head>
 <body>
-  <span class="brand"><span class="dark">Expat</span><span class="red">Events</span></span>
   <button class="back" onclick="history.back()">← Back</button>
   <h1>Terms of Use</h1>
   <p class="meta">Last updated: March 2026</p>
