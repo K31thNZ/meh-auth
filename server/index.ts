@@ -94,7 +94,9 @@ const BRAND_DOC_CSS = `
   a  { color: #E72350; text-decoration: none; }
   a:hover { text-decoration: underline; }
   .brand { font-family: "Playfair Display", serif; font-size: 15px;
-           color: #E72350; font-weight: 600; margin-bottom: 32px; display: block; }
+           font-weight: 600; margin-bottom: 32px; display: block; }
+  .brand .red { color: #E72350; }
+  .brand .dark { color: #251D18; }
   .back { display: inline-flex; align-items: center; gap: 6px; font-size: 14px;
           color: #7E6F67; margin-bottom: 32px; cursor: pointer;
           background: none; border: none; font-family: "Plus Jakarta Sans", sans-serif; }
@@ -113,7 +115,7 @@ app.get("/terms", (_req, res) => {
   <style>${BRAND_DOC_CSS}</style>
 </head>
 <body>
-  <span class="brand">ExpatEvents</span>
+  <span class="brand"><span class="dark">Expat</span><span class="red">Events</span></span>
   <button class="back" onclick="history.back()">← Back</button>
   <h1>Terms of Use</h1>
   <p class="meta">Last updated: March 2026</p>
@@ -153,7 +155,7 @@ app.get("/privacy", (_req, res) => {
   <style>${BRAND_DOC_CSS}</style>
 </head>
 <body>
-  <span class="brand">ExpatEvents</span>
+  <span class="brand"><span class="dark">Expat</span><span class="red">Events</span></span>
   <button class="back" onclick="history.back()">← Back</button>
   <h1>Privacy Policy</h1>
   <p class="meta">Last updated: March 2026</p>
@@ -226,10 +228,11 @@ app.get("/login", (req, res) => {
       font-family: "Playfair Display", serif;
       font-size: 22px;
       font-weight: 700;
-      color: #E72350;
       letter-spacing: -0.01em;
       margin-bottom: 32px;
     }
+    .wordmark .dark { color: #251D18; }
+    .wordmark .red  { color: #E72350; }
 
     /* ── Card ── */
     .card {
@@ -440,7 +443,7 @@ app.get("/login", (req, res) => {
 </head>
 <body>
 
-  <div class="wordmark">ExpatEvents</div>
+  <div class="wordmark"><span class="dark">Expat</span><span class="red">Events</span></div>
 
   <div class="card">
     <h1 class="card-title">Welcome back</h1>

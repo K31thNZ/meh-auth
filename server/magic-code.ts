@@ -92,7 +92,9 @@ export function registerMagicCodeRoutes(app: Express) {
           <!-- Wordmark -->
           <tr>
             <td align="center" style="padding-bottom:28px;">
-              <span style="font-size:22px;font-weight:700;color:#E72350;letter-spacing:-0.01em;">ExpatEvents</span>
+              <span style="font-size:24px;font-weight:700;letter-spacing:-0.01em;">
+                <span style="color:#251D18;">Expat</span><span style="color:#E72350;">Events</span>
+              </span>
             </td>
           </tr>
 
