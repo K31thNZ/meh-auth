@@ -1,5 +1,7 @@
+modules = ["nodejs-20"]
+[agent]
+expertMode = true
 
-<<<<<<< HEAD
 [nix]
 channel = "stable-25_05"
 
@@ -8,15 +10,9 @@ channel = "stable-25_05"
 [userenv.shared]
 PORT = "5000"
 NODE_ENV = "development"
-ALLOWED_ORIGINS = "https://expatevents.org,https://event-hub-nrgx.onrender.com,https://games-rw9l.onrender.com,https://02035f2b-13af-48c0-b11e-856ce1c4339d-00-1yv8ejztujn3l.kirk.replit.dev"
-COOKIE_DOMAIN = ".expatevents.org"
-AUTH_SERVICE_URL = "https://auth.expatevents.org"
-ADMIN_TELEGRAM_ID = "982149637"
-DATABASE_URL = "postgresql://neondb_owner:npg_knRWGAu3oft0@ep-cold-bird-agauwq3h-pooler.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-GOOGLE_CLIENT_ID = "902332665557-0t89dbagkl276mhhcb0n904phh3qc43c.apps.googleusercontent.com"
-RESEND_API_KEY = "re_NaULCzzQ_CVFEpmxDThchL6NayT1cqSJx"
-TELEGRAM_BOT_TOKEN = "8745167732:AAFB4Ze80jMKWFQ9LdTIwMOb5GWi1v_ml48"
-YANDEX_CLIENT_ID = "81cd955f78bb4aaa980ffba9ce040d9b"
+ALLOWED_ORIGINS = ""
+COOKIE_DOMAIN = ""
+AUTH_SERVICE_URL = ""
 
 [workflows]
 runButton = "Project"
@@ -50,5 +46,3 @@ externalPort = 80
 deploymentTarget = "autoscale"
 run = ["node", "dist/index.cjs"]
 build = ["npm", "run", "build"]
-=======
->>>>>>> 6bed4d8fba6fd5bfa19ad866d882fb9261ddab8e
