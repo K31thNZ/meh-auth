@@ -1,0 +1,50 @@
+2026-03-31T11:58:33.76615789Z ==> Downloading cache...
+2026-03-31T11:58:33.825144106Z ==> Cloning from https://github.com/K31thNZ/meh-auth
+2026-03-31T11:58:34.613347446Z ==> Checking out commit 6bed4d8fba6fd5bfa19ad866d882fb9261ddab8e in branch main
+2026-03-31T11:58:40.159290345Z ==> Downloaded 94MB in 2s. Extraction took 4s.
+2026-03-31T11:59:13.088307647Z ==> Using Node.js version 22.22.0 (default)
+2026-03-31T11:59:13.123621389Z ==> Docs on specifying a Node.js version: https://render.com/docs/node-version
+2026-03-31T11:59:13.43562478Z ==> Running build command 'npm install && npm run build'...
+2026-03-31T11:59:15.230988463Z 
+2026-03-31T11:59:15.231016213Z up to date, audited 296 packages in 2s
+2026-03-31T11:59:15.231083316Z 
+2026-03-31T11:59:15.231099987Z 105 packages are looking for funding
+2026-03-31T11:59:15.231104927Z   run `npm fund` for details
+2026-03-31T11:59:15.235743705Z 
+2026-03-31T11:59:15.235760796Z 7 vulnerabilities (5 moderate, 2 critical)
+2026-03-31T11:59:15.235765816Z 
+2026-03-31T11:59:15.235771316Z To address all issues (including breaking changes), run:
+2026-03-31T11:59:15.235776577Z   npm audit fix --force
+2026-03-31T11:59:15.235781037Z 
+2026-03-31T11:59:15.235785937Z Run `npm audit` for details.
+2026-03-31T11:59:15.784388217Z 
+2026-03-31T11:59:15.784409908Z > meh-auth@1.0.0 build
+2026-03-31T11:59:15.784414258Z > esbuild server/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:pg-native --external:cpu-features --external:passport-yandex --external:connect-pg-simple
+2026-03-31T11:59:15.784418718Z 
+2026-03-31T11:59:16.282874409Z 
+2026-03-31T11:59:16.28289464Z   dist/index.cjs  5.7mb ⚠️
+2026-03-31T11:59:16.282899381Z 
+2026-03-31T11:59:16.282904961Z ⚡ Done in 490ms
+2026-03-31T11:59:42.042639031Z ==> Uploading build...
+2026-03-31T11:59:50.872406932Z ==> Uploaded in 3.7s. Compression took 5.2s
+2026-03-31T11:59:50.96149079Z ==> Build successful 🎉
+2026-03-31T11:59:57.33347102Z ==> Deploying...
+2026-03-31T11:59:57.51701536Z ==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+2026-03-31T12:00:11.263115241Z ==> Running 'npm start'
+2026-03-31T12:00:12.372685142Z 
+2026-03-31T12:00:12.372718093Z > meh-auth@1.0.0 start
+2026-03-31T12:00:12.372723763Z > NODE_ENV=production node dist/index.cjs
+2026-03-31T12:00:12.372729133Z 
+2026-03-31T12:00:14.76920222Z [meh-auth] Running on port 10000 (production)
+2026-03-31T12:00:14.769608659Z [meh-auth] Cookie domain: .expatevents.org
+2026-03-31T12:00:14.769635719Z [meh-auth] Allowed origins: https://expatevents.org,https://event-hub-nrgx.onrender.com,https://games-rw9l.onrender.com
+2026-03-31T12:00:14.86078033Z [bot] Telegram bot started
+2026-03-31T12:00:14.861005504Z [bot] Bot commands registered
+2026-03-31T12:00:14.861138397Z [matcher] Scheduled — next run in 1080 minutes
+2026-03-31T12:00:19.186742808Z ==> Your service is live 🎉
+2026-03-31T12:00:19.411919897Z ==> 
+2026-03-31T12:00:19.414300251Z ==> ///////////////////////////////////////////////////////////
+2026-03-31T12:00:19.416367278Z ==> 
+2026-03-31T12:00:19.418463955Z ==> Available at your primary URL https://meh-auth.onrender.com
+2026-03-31T12:00:19.420593543Z ==> 
+2026-03-31T12:00:19.422770812Z ==> ///////////////////////////////////////////////////////////
