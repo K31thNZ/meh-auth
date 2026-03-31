@@ -1,7 +1,5 @@
-modules = ["nodejs-20", "postgresql-16"]
-[agent]
-expertMode = true
 
+<<<<<<< HEAD
 [nix]
 channel = "stable-25_05"
 
@@ -52,3 +50,5 @@ externalPort = 80
 deploymentTarget = "autoscale"
 run = ["node", "dist/index.cjs"]
 build = ["npm", "run", "build"]
+=======
+>>>>>>> 6bed4d8fba6fd5bfa19ad866d882fb9261ddab8e
