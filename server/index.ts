@@ -222,17 +222,48 @@ app.get("/login", (req, res) => {
       color: #251D18;
     }
 
-    /* ── Brand wordmark ── */
-    .wordmark {
+    /* ── Brand ── */
+    .brand-logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      margin-bottom: 32px;
+      transition: opacity 0.2s;
+    }
+    .brand-logo:hover {
+      opacity: 0.9;
+    }
+    .brand-icon {
+      width: 48px;
+      height: 48px;
+      background: linear-gradient(135deg, #E72350, #F97316);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 20px -6px rgba(231,35,80,0.25);
+      transition: transform 0.2s ease;
+    }
+    .brand-logo:hover .brand-icon {
+      transform: scale(1.05);
+    }
+    .brand-icon svg {
+      width: 28px;
+      height: 28px;
+      color: white;
+    }
+    .brand-text {
       font-family: "Playfair Display", serif;
-      font-size: 22px;
+      font-size: 28px;
       font-weight: 700;
       letter-spacing: -0.01em;
-      margin-bottom: 32px;
+      color: #251D18;
     }
-    .wordmark .dark { color: #251D18; }
-    .wordmark .red  { color: #E72350; }
-
+    .brand-text span {
+      color: #E72350;
+    }
+    
     /* ── Card ── */
     .card {
       background: #fff;
