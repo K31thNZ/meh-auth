@@ -224,13 +224,22 @@ export function registerAuthRoutes(app: Express) {
   });
 
   app.patch("/api/user/profile", requireAuth, async (req, res, next) => {
-    try {
-      const { displayName, avatarUrl } = req.body;
-      const user = await storage.updateUser((req.user as any).id, { displayName, avatarUrl });
-      res.json(sanitize(user!));
-    } catch (err) { next(err); }
-  });
-
+  try {
+    const { displayName, avatarUrl, telegramId } = req.body;
+    const updates: Record<string, any> = {};
+    if (displayName !== undefined) updates.displayName = displayName;
+    if (avatarUrl !== undefined) updates.avatarUrl = avatarUrl;
+    if (telegramId !== undefined) {
+      const tid = String(telegramId).trim();
+      if (!/^\d+$/.test(tid)) {
+        return res.status(400).json({ error: "telegramId must be a numeric string" });
+      }
+      updates.telegramId = tid;
+    }
+    const user = await storage.updateUser((req.user as any).id, updates);
+    res.json(sanitize(user!));
+  } catch (err) { next(err); }
+});
   // ── Availability ──────────────────────────────────────────────────────────
   app.get("/api/availability", requireAuth, async (req, res) => {
     res.json(await storage.getUserSlots((req.user as any).id));
