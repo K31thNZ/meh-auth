@@ -190,7 +190,7 @@ app.get("/privacy", (_req, res) => {
 </html>`);
 });
 
-// ── Login page ────────────────────────────────────────────────────────────
+// ── Login page (logo removed) ─────────────────────────────────────────────
 app.get("/login", (req, res) => {
   const returnTo = encodeURIComponent((req.query.returnTo as string) ?? "/");
   const authUrl = process.env.AUTH_SERVICE_URL ?? "";
@@ -206,7 +206,7 @@ app.get("/login", (req, res) => {
   <link rel="icon" href="https://expatevents.org/favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Plus+Jakarta+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -221,7 +221,7 @@ app.get("/login", (req, res) => {
       padding: 24px 16px;
       color: #251D18;
     }
-    
+
     /* ── Card ── */
     .card {
       background: #fff;
@@ -431,7 +431,7 @@ app.get("/login", (req, res) => {
 </head>
 <body>
 
-  <div class="wordmark"><span class="dark">Expat</span><span class="red">Events</span></div>
+  <!-- Logo removed entirely -->
 
   <div class="card">
     <h1 class="card-title">Welcome back</h1>
