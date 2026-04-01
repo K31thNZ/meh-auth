@@ -115,7 +115,7 @@ app.get("/terms", (_req, res) => {
   <style>${BRAND_DOC_CSS}</style>
 </head>
 <body>
-  <button class="back" onclick="history.back()">← Back</button>
+<span class="brand"><span class="dark">Expat</span><span class="red">Events</span></span>
   <h1>Terms of Use</h1>
   <p class="meta">Last updated: March 2026</p>
   <h2>1. Acceptance of Terms</h2>
@@ -155,7 +155,6 @@ app.get("/privacy", (_req, res) => {
 </head>
 <body>
   <span class="brand"><span class="dark">Expat</span><span class="red">Events</span></span>
-  <button class="back" onclick="history.back()">← Back</button>
   <h1>Privacy Policy</h1>
   <p class="meta">Last updated: March 2026</p>
   <h2>1. Information We Collect</h2>
