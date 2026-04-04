@@ -1,3 +1,5 @@
+// server/index.ts
+import { registerTelegramLinkRoutes } from "./telegram-link";
 import { registerMagicCodeRoutes } from "./magic-code";
 import { initBot } from "./bot";
 import { scheduleMatcher } from "./matcher";
@@ -626,6 +628,7 @@ document.addEventListener("keydown", e => {
 registerMagicCodeRoutes(app);
 // ── Notify routes ─────────────────────────────────────────────────────────
 registerNotifyRoutes(app);
+registerTelegramLinkRoutes(app);
 
 // ── Global error handler ──────────────────────────────────────────────────
 app.use((err: any, _req: any, res: any, _next: any) => {
