@@ -7,17 +7,6 @@ import {
   pgTable, serial, integer, text, boolean, timestamp, real,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
-import { pgTable, text, integer, boolean, timestamp } from "drizzle-orm/pg-core";
-import { users } from "./models/auth"; // adjust import path if needed
-
-export const telegramLinkTokens = pgTable("telegram_link_tokens", {
-  token:     text("token").primaryKey(),        // UUID without dashes (32 chars)
-  userId:    integer("user_id")
-               .references(() => users.id, { onDelete: "cascade" })
-               .notNull(),
-  expiresAt: timestamp("expires_at").notNull(),
-  used:      boolean("used").default(false).notNull(),
-});
 
 // ── Users ─────────────────────────────────────────────────────────────────
 export const users = pgTable("users", {
@@ -44,6 +33,19 @@ export const users = pgTable("users", {
   dice: integer("dice").notNull().default(0),
 
   createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ── Telegram link tokens ──────────────────────────────────────────────────
+// Single-use tokens for the deep link account linking flow.
+// Generated when user clicks "Connect Telegram" on their profile.
+// Deleted after use or expiry.
+export const telegramLinkTokens = pgTable("telegram_link_tokens", {
+  token:     text("token").primaryKey(),           // UUID without dashes (32 chars)
+  userId:    integer("user_id")
+               .references(() => users.id, { onDelete: "cascade" })
+               .notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  used:      boolean("used").default(false).notNull(),
 });
 
 // ── Availability ──────────────────────────────────────────────────────────
@@ -82,20 +84,19 @@ export const notifications = pgTable("notifications", {
 });
 
 // ── Host registry ─────────────────────────────────────────────────────────
-// Controls the multi-tenant platform. One row = one approved event host.
 export const hosts = pgTable("hosts", {
   id:          serial("id").primaryKey(),
-  slug:        text("slug").notNull().unique(),       // subdomain slug e.g. "pub-quiz"
-  name:        text("name").notNull(),                // display name e.g. "The Shamrock Quiz Night"
+  slug:        text("slug").notNull().unique(),
+  name:        text("name").notNull(),
   description: text("description").notNull().default(""),
-  category:    text("category").notNull(),            // "games"|"networking"|"cultural" etc.
+  category:    text("category").notNull(),
   ownerUserId: integer("owner_user_id").references(() => users.id),
   logoUrl:     text("logo_url"),
   primaryColor: text("primary_color").default("#D85A30"),
-  paymentUrl:  text("payment_url"),                   // external link — Timepad, Stripe, etc.
+  paymentUrl:  text("payment_url"),
   websiteUrl:  text("website_url"),
   telegramHandle: text("telegram_handle"),
-  status:      text("status").notNull().default("pending"), // "pending"|"approved"|"suspended"
+  status:      text("status").notNull().default("pending"),
   approvedAt:  timestamp("approved_at"),
   approvedBy:  integer("approved_by").references(() => users.id),
   createdAt:   timestamp("created_at").defaultNow(),
@@ -112,21 +113,23 @@ export const hostApplications = pgTable("host_applications", {
   paymentUrl:   text("payment_url"),
   websiteUrl:   text("website_url"),
   telegramHandle: text("telegram_handle"),
-  notes:        text("notes"),             // admin review notes
+  notes:        text("notes"),
   status:       text("status").notNull().default("pending"),
   createdAt:    timestamp("created_at").defaultNow(),
 });
 
 // ── Relations ─────────────────────────────────────────────────────────────
 export const usersRelations = relations(users, ({ many }) => ({
-  availabilitySlots: many(availabilitySlots),
-  notifications:     many(notifications),
-  hosts:             many(hosts),
+  availabilitySlots:   many(availabilitySlots),
+  notifications:       many(notifications),
+  hosts:               many(hosts),
+  telegramLinkTokens:  many(telegramLinkTokens),
 }));
 
 // ── Type exports ──────────────────────────────────────────────────────────
-export type User             = typeof users.$inferSelect;
-export type AvailabilitySlot = typeof availabilitySlots.$inferSelect;
-export type Notification     = typeof notifications.$inferSelect;
-export type Host             = typeof hosts.$inferSelect;
-export type HostApplication  = typeof hostApplications.$inferSelect;
+export type User               = typeof users.$inferSelect;
+export type AvailabilitySlot   = typeof availabilitySlots.$inferSelect;
+export type Notification       = typeof notifications.$inferSelect;
+export type Host               = typeof hosts.$inferSelect;
+export type HostApplication    = typeof hostApplications.$inferSelect;
+export type TelegramLinkToken  = typeof telegramLinkTokens.$inferSelect;
