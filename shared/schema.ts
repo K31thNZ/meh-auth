@@ -1,12 +1,23 @@
 // shared/schema.ts
 // The shared user layer — owned by meh-auth.
-// All other MEH services (Event-Hub, MRDC, future hubs) read users from here
+// All other MEH services (Event-Hub, future hubs) read users from here
 // by calling the auth service API, not by connecting to this database directly.
 
 import {
   pgTable, serial, integer, text, boolean, timestamp, real,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
+import { pgTable, text, integer, boolean, timestamp } from "drizzle-orm/pg-core";
+import { users } from "./models/auth"; // adjust import path if needed
+
+export const telegramLinkTokens = pgTable("telegram_link_tokens", {
+  token:     text("token").primaryKey(),        // UUID without dashes (32 chars)
+  userId:    integer("user_id")
+               .references(() => users.id, { onDelete: "cascade" })
+               .notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  used:      boolean("used").default(false).notNull(),
+});
 
 // ── Users ─────────────────────────────────────────────────────────────────
 export const users = pgTable("users", {
