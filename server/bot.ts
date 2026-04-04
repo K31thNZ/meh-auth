@@ -9,6 +9,7 @@ import { db } from "./db";
 import { users, notifications } from "@shared/schema";
 import { eq, and, gte, inArray, isNotNull } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
+import { handleTelegramStartToken } from "./telegram-link";
 
 const CATEGORY_ICONS: Record<string, string> = {
   networking: "🔗", tech: "💻", culture: "🎨", food: "🍔",
@@ -195,38 +196,44 @@ export function initBot(): void {
   });
 
   // /start — link Telegram account to meh-auth user or prompt sign-in
-  bot.onText(/\/start/, async (msg) => {
-    const chatId = msg.chat.id;
-    const telegramId = String(msg.from?.id ?? chatId);
-    const firstName = msg.from?.first_name ?? "there";
+  bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from?.id ?? chatId);
+  const firstName = msg.from?.first_name ?? "there";
+  const token = match?.[1]?.trim();
 
-    // Check if this telegramId is already linked to a meh-auth user
-    const [existing] = await db
-      .select()
-      .from(users)
-      .where(eq(users.telegramId, telegramId));
+  // If a token was passed, handle the deep link flow
+  if (token) {
+    await handleTelegramStartToken(chatId, telegramId, token, firstName);
+    return;
+  }
 
-    if (existing) {
-      await bot!.sendMessage(chatId,
-        `👋 Welcome back, *${existing.displayName ?? existing.username}*!\n\n` +
-        `You're subscribed to ExpatEvents notifications.\n` +
-        `Your interests: ${existing.interests?.map(i => `${CATEGORY_ICONS[i] ?? ""} ${getCategoryLabel(i)}`).join(", ") || "none set yet"}\n\n` +
-        `Update your profile at [expatevents.org/profile](https://expatevents.org/profile)`,
-        { parse_mode: "Markdown" }
-      );
-    } else {
-      await bot!.sendMessage(chatId,
-        `👋 Hi ${firstName}! Welcome to *ExpatEvents*.\n\n` +
-        `To receive personalised event notifications, sign in to your account and connect Telegram:\n\n` +
-        `1. Go to [expatevents.org](https://expatevents.org)\n` +
-        `2. Sign in with Google or Yandex\n` +
-        `3. Open your profile and tap "Connect Telegram"\n\n` +
-        `Your Telegram ID is: \`${telegramId}\`\n` +
-        `_(copy this and paste it in your profile)_`,
-        { parse_mode: "Markdown" }
-      );
-    }
-  });
+  // Plain /start — check if already linked
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(eq(users.telegramId, telegramId));
+
+  if (existing) {
+    await bot!.sendMessage(chatId,
+      `👋 Welcome back, *${existing.displayName ?? existing.username}*!\n\n` +
+      `You're subscribed to ExpatEvents notifications.\n` +
+      `Your interests: ${existing.interests?.map((i: string) => `${CATEGORY_ICONS[i] ?? ""} ${getCategoryLabel(i)}`).join(", ") || "none set yet"}\n\n` +
+      `[Update your profile](https://expatevents.org/profile)`,
+      { parse_mode: "Markdown" }
+    );
+  } else {
+    await bot!.sendMessage(chatId,
+      `👋 Hi ${firstName}! Welcome to *ExpatEvents*.\n\n` +
+      `To receive personalised event notifications, connect your account:\n\n` +
+      `1. Go to [expatevents.org](https://expatevents.org)\n` +
+      `2. Sign in and open your profile\n` +
+      `3. Tap *Connect Telegram* — you'll get a link that brings you straight back here\n\n` +
+      `Your accounts will be linked automatically.`,
+      { parse_mode: "Markdown" }
+    );
+  }
+});
 
   // /interests — show current interests
   bot.onText(/\/interests/, async (msg) => {
