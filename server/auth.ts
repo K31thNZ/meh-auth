@@ -201,8 +201,11 @@ export function registerAuthRoutes(app: Express) {
       }
       req.login(user, err => {
         if (err) return next(err);
-        const returnTo = (req.session as any).returnTo ?? getAllowedOrigins()[0];
+        let returnTo = (req.session as any).returnTo ?? getAllowedOrigins()[0];
         delete (req.session as any).returnTo;
+        // Add justLoggedIn flag for Telegram redirect as well
+        const separator = returnTo.includes('?') ? '&' : '?';
+        returnTo = `${returnTo}${separator}justLoggedIn=true`;
         res.redirect(returnTo);
       });
     } catch (err) { next(err); }
@@ -369,8 +372,11 @@ function storeReturnTo(req: any) {
 }
 
 function getReturnTo(req: any): string {
-  const r = (req.session as any).returnTo ?? getAllowedOrigins()[0] ?? "/";
+  let r = (req.session as any).returnTo ?? getAllowedOrigins()[0] ?? "/";
   delete (req.session as any).returnTo;
+  // Add justLoggedIn flag
+  const separator = r.includes('?') ? '&' : '?';
+  r = `${r}${separator}justLoggedIn=true`;
   return r;
 }
 
