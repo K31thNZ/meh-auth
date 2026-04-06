@@ -9,13 +9,16 @@ import cors from "cors";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 import pg from "pg";
+import bcrypt from "bcryptjs";
 import { setupPassport, registerAuthRoutes } from "./auth";
+import { db } from "./db";
+import { users } from "@shared/schema";
+import { eq } from "drizzle-orm";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const PgSession = connectPg(session);
 
-// The pg driver doesn't support channel_binding=require (Neon includes it) — strip it
 const dbConString = (process.env.DATABASE_URL ?? "")
   .replace(/[&?]channel_binding=[^&]*/g, "");
 
@@ -189,7 +192,7 @@ app.get("/privacy", (_req, res) => {
 </html>`);
 });
 
-// ── Login page (logo removed) ─────────────────────────────────────────────
+// ── Login page ─────────────────────────────────────────────────────────────
 app.get("/login", (req, res) => {
   const returnTo = encodeURIComponent((req.query.returnTo as string) ?? "/");
   const authUrl = process.env.AUTH_SERVICE_URL ?? "";
@@ -208,7 +211,6 @@ app.get("/login", (req, res) => {
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Plus+Jakarta+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
     body {
       font-family: "Plus Jakarta Sans", sans-serif;
       background: #FCFAF8;
@@ -220,8 +222,6 @@ app.get("/login", (req, res) => {
       padding: 24px 16px;
       color: #251D18;
     }
-
-    /* ── Card ── */
     .card {
       background: #fff;
       border-radius: 16px;
@@ -230,7 +230,6 @@ app.get("/login", (req, res) => {
       max-width: 400px;
       box-shadow: 0 2px 24px rgba(37,29,24,0.08), 0 1px 4px rgba(37,29,24,0.04);
     }
-
     .card-title {
       font-family: "Playfair Display", serif;
       font-size: 26px;
@@ -245,8 +244,6 @@ app.get("/login", (req, res) => {
       text-align: center;
       margin-bottom: 28px;
     }
-
-    /* ── Field label ── */
     .field-label {
       font-size: 12px;
       font-weight: 600;
@@ -255,8 +252,6 @@ app.get("/login", (req, res) => {
       letter-spacing: 0.07em;
       margin-bottom: 7px;
     }
-
-    /* ── Inputs — pill shape per brand spec ── */
     input {
       width: 100%;
       padding: 13px 18px;
@@ -280,8 +275,6 @@ app.get("/login", (req, res) => {
       font-size: 22px;
       text-align: center;
     }
-
-    /* ── Primary button ── */
     .btn-primary {
       width: 100%;
       padding: 13px;
@@ -298,8 +291,6 @@ app.get("/login", (req, res) => {
     }
     .btn-primary:hover  { background: #cf1f48; }
     .btn-primary:active { transform: scale(0.98); }
-
-    /* ── Ghost / text button ── */
     .btn-ghost {
       width: 100%;
       padding: 11px;
@@ -313,8 +304,6 @@ app.get("/login", (req, res) => {
       transition: color 0.15s;
     }
     .btn-ghost:hover { color: #E72350; }
-
-    /* ── Back button ── */
     .back-btn {
       display: inline-flex;
       align-items: center;
@@ -329,8 +318,6 @@ app.get("/login", (req, res) => {
       padding: 0;
     }
     .back-btn:hover { color: #251D18; }
-
-    /* ── Divider ── */
     .divider {
       display: flex;
       align-items: center;
@@ -348,8 +335,6 @@ app.get("/login", (req, res) => {
       height: 1px;
       background: #EDE9E5;
     }
-
-    /* ── OAuth buttons ── */
     .oauth-btn {
       display: flex;
       align-items: center;
@@ -369,29 +354,10 @@ app.get("/login", (req, res) => {
       margin-bottom: 10px;
       transition: border-color 0.15s, background 0.15s;
     }
-    .oauth-btn:hover {
-      border-color: #C5BDB8;
-      background: #F5F1EE;
-    }
-    .oauth-btn.yandex {
-      background: #FC3F1D;
-      border-color: #FC3F1D;
-      color: #fff;
-    }
-    .oauth-btn.yandex:hover {
-      background: #e03618;
-      border-color: #e03618;
-    }
-
-    /* ── Telegram widget centering ── */
-    #tg-container {
-      display: flex;
-      justify-content: center;
-      margin-top: 4px;
-      margin-bottom: 4px;
-    }
-
-    /* ── Error message ── */
+    .oauth-btn:hover { border-color: #C5BDB8; background: #F5F1EE; }
+    .oauth-btn.yandex { background: #FC3F1D; border-color: #FC3F1D; color: #fff; }
+    .oauth-btn.yandex:hover { background: #e03618; border-color: #e03618; }
+    #tg-container { display: flex; justify-content: center; margin-top: 4px; margin-bottom: 4px; }
     .error {
       font-size: 13px;
       color: #E72350;
@@ -400,16 +366,7 @@ app.get("/login", (req, res) => {
       display: none;
       min-height: 20px;
     }
-
-    /* ── Code hint ── */
-    .hint {
-      font-size: 14px;
-      color: #7E6F67;
-      margin-bottom: 16px;
-      line-height: 1.5;
-    }
-
-    /* ── Footer ── */
+    .hint { font-size: 14px; color: #7E6F67; margin-bottom: 16px; line-height: 1.5; }
     .footer {
       font-size: 12px;
       color: #B8AFA9;
@@ -417,34 +374,22 @@ app.get("/login", (req, res) => {
       margin-top: 24px;
       line-height: 1.75;
     }
-    .footer a {
-      color: #7E6F67;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
+    .footer a { color: #7E6F67; text-decoration: underline; text-underline-offset: 2px; }
     .footer a:hover { color: #E72350; }
-
-    /* ── Step visibility ── */
     #code-step, #password-step { display: none; }
   </style>
 </head>
 <body>
-
-  <!-- Logo removed entirely -->
-
   <div class="card">
     <h1 class="card-title">Welcome back</h1>
     <p class="card-subtitle">Sign in to your account to continue</p>
 
-    <!-- Step 1: Email -->
     <div id="email-step">
       <div class="field-label">Email address</div>
       <input type="email" id="email-input" placeholder="yours@example.com" autocomplete="email" />
       <button class="btn-primary" onclick="handleGetCode()">Send me a code</button>
       <button class="btn-ghost" onclick="showPasswordStep()">Sign in with username &amp; password</button>
-
       <div class="divider">or</div>
-
       <a href="${authUrl}/api/auth/google?returnTo=${returnTo}" class="oauth-btn">
         <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true">
           <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
@@ -454,19 +399,16 @@ app.get("/login", (req, res) => {
         </svg>
         Continue with Google
       </a>
-
       <a href="${authUrl}/api/auth/yandex?returnTo=${returnTo}" class="oauth-btn yandex">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
           <path fill="#fff" d="M13.32 4H10.9C8.1 4 6.5 5.46 6.5 7.93c0 2.18 1.06 3.4 3.08 4.73L7 20h2.7l2.78-7.05-.6-.37C10.1 11.4 9.2 10.5 9.2 7.93c0-1.55.92-2.46 2.72-2.46h1.4V20H16V4h-2.68z"/>
         </svg>
         Continue with Yandex
       </a>
-
       <div id="tg-container"></div>
       <div id="email-error" class="error"></div>
     </div>
 
-    <!-- Step 2: Verification code -->
     <div id="code-step">
       <button class="back-btn" onclick="showEmailStep()">← Back</button>
       <div class="field-label">Verification code</div>
@@ -477,7 +419,6 @@ app.get("/login", (req, res) => {
       <div id="code-error" class="error"></div>
     </div>
 
-    <!-- Step 3: Username + password -->
     <div id="password-step">
       <button class="back-btn" onclick="showEmailStep()">← Back</button>
       <div class="field-label">Username</div>
@@ -616,7 +557,7 @@ async function handlePasswordLogin() {
 
 document.addEventListener("keydown", e => {
   if (e.key !== "Enter") return;
-  if (document.getElementById("code-step").style.display === "block")     handleVerifyCode();
+  if (document.getElementById("code-step").style.display === "block")          handleVerifyCode();
   else if (document.getElementById("password-step").style.display === "block") handlePasswordLogin();
   else handleGetCode();
 });
@@ -624,11 +565,95 @@ document.addEventListener("keydown", e => {
 </body>
 </html>`);
 });
-// ...
+
 registerMagicCodeRoutes(app);
-// ── Notify routes ─────────────────────────────────────────────────────────
 registerNotifyRoutes(app);
 registerTelegramLinkRoutes(app);
+
+// ── GET /api/admin/users ───────────────────────────────────────────────────
+// Returns all users. Accepts an admin session OR a valid SERVICE_SECRET header.
+const VALID_ROLES = ["free", "premium", "host", "curator", "admin"];
+
+function isAdminOrService(req: any): boolean {
+  const serviceSecret = process.env.SERVICE_SECRET;
+  if (serviceSecret && req.headers["x-service-secret"] === serviceSecret) return true;
+  return req.isAuthenticated?.() && (req.user as any)?.role === "admin";
+}
+
+app.get("/api/admin/users", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const allUsers = await db.select({
+      id:          users.id,
+      username:    users.username,
+      displayName: users.displayName,
+      email:       users.email,
+      avatarUrl:   users.avatarUrl,
+      role:        users.role,
+      telegramId:  users.telegramId,
+      googleId:    users.googleId,
+      yandexId:    users.yandexId,
+      createdAt:   users.createdAt,
+    }).from(users);
+    res.json(allUsers);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /api/admin/users/:id/role ───────────────────────────────────────
+app.patch("/api/admin/users/:id/role", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+
+  const targetId = parseInt(req.params.id);
+  const { role } = req.body;
+
+  if (!VALID_ROLES.includes(role)) {
+    return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(", ")}` });
+  }
+  if (req.isAuthenticated?.() && (req.user as any)?.id === targetId) {
+    return res.status(400).json({ error: "Cannot change your own role" });
+  }
+
+  try {
+    await db.update(users).set({ role }).where(eq(users.id, targetId));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/auth/change-password ────────────────────────────────────────
+app.post("/api/auth/change-password", async (req: any, res: any) => {
+  if (!req.isAuthenticated?.() || !req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: "Both currentPassword and newPassword are required" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "New password must be at least 8 characters" });
+  }
+
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
+    if (!user?.password) {
+      return res.status(400).json({ error: "No password set on this account — use OAuth sign-in." });
+    }
+    const valid = await bcrypt.compare(currentPassword, user.password);
+    if (!valid) {
+      return res.status(400).json({ error: "Current password is incorrect" });
+    }
+    const hashed = await bcrypt.hash(newPassword, 12);
+    await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── Global error handler ──────────────────────────────────────────────────
 app.use((err: any, _req: any, res: any, _next: any) => {
