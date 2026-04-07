@@ -13,7 +13,7 @@ export const users = pgTable("users", {
   id:          serial("id").primaryKey(),
   username:    text("username").notNull().unique(),
   password:    text("password"),                        // null for OAuth users
-  role:        text("role").notNull().default("free"), // "member" | "admin"
+  role:        text("role").notNull().default("free"), // "free member" | "admin"
   displayName: text("display_name"),
   avatarUrl:   text("avatar_url"),
   email:       text("email").unique(),
