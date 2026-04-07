@@ -4,7 +4,7 @@
 // by calling the auth service API, not by connecting to this database directly.
 import { sql } from "drizzle-orm";
 import {
-  pgTable, serial, integer, text, boolean, timestamp, real,
+  pgTable, serial, integer, text, boolean, timestamp,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
