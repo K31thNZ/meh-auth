@@ -4,7 +4,7 @@
 // by calling the auth service API, not by connecting to this database directly.
 import { sql } from "drizzle-orm";
 import {
-  pgTable, serial, integer, text, boolean, timestamptz,
+  pgTable, serial, integer, text, boolean, timestamp,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
@@ -32,7 +32,7 @@ export const users = pgTable("users", {
   // Games in English loyalty — stored centrally so any app can read it
   dice: integer("dice").notNull().default(0),
 
-  createdAt: timestamptz("created_at").defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 // ── Telegram link tokens ──────────────────────────────────────────────────
@@ -44,7 +44,7 @@ export const telegramLinkTokens = pgTable("telegram_link_tokens", {
   userId:    integer("user_id")
                .references(() => users.id, { onDelete: "cascade" })
                .notNull(),
-  expiresAt: timestamptz("expires_at").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   used:      boolean("used").default(false).notNull(),
 });
 
@@ -57,7 +57,7 @@ export const availabilitySlots = pgTable("availability_slots", {
   day:      integer("day").notNull(),    // 0=Sun … 6=Sat (CHECK constraint enforced in app)
   hour:     integer("hour").notNull(),   // 0–23 (CHECK constraint enforced in app)
   appScope: text("app_scope").notNull().default("both"), // "expat"|"games"|"both"
-  createdAt: timestamptz("created_at").defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 export const availabilityMatches = pgTable("availability_matches", {
@@ -68,7 +68,7 @@ export const availabilityMatches = pgTable("availability_matches", {
   userIds:   integer("user_ids").array().notNull(), // Note: no FK – use junction table for production
   appScope:  text("app_scope").notNull().default("expat"),
   notified:  boolean("notified").notNull().default(false),
-  createdAt: timestamptz("created_at").defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 // ── Notifications ─────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ export const notifications = pgTable("notifications", {
   eventId:  integer("event_id"),        // external reference to Event-Hub (no FK)
   link:     text("link"),
   read:     boolean("read").notNull().default(false),
-  createdAt: timestamptz("created_at").defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 // ── Host registry ─────────────────────────────────────────────────────────
@@ -101,9 +101,9 @@ export const hosts = pgTable("hosts", {
   websiteUrl:  text("website_url"),
   telegramHandle: text("telegram_handle"),
   status:      text("status").notNull().default("pending"),
-  approvedAt:  timestamptz("approved_at"),
+  approvedAt:  timestamp("approved_at", { withTimezone: true }),
   approvedBy:  integer("approved_by").references(() => users.id, { onDelete: "set null" }),
-  createdAt:   timestamptz("created_at").defaultNow(),
+  createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 // ── Host applications ─────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ export const hostApplications = pgTable("host_applications", {
   telegramHandle: text("telegram_handle"),
   notes:        text("notes"),
   status:       text("status").notNull().default("pending"),
-  createdAt:    timestamptz("created_at").defaultNow(),
+  createdAt:    timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 // ── Relations ─────────────────────────────────────────────────────────────
