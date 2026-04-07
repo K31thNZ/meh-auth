@@ -2,7 +2,7 @@
 // The shared user layer — owned by meh-auth.
 // All other MEH services (Event-Hub, future hubs) read users from here
 // by calling the auth service API, not by connecting to this database directly.
-
+import { sql } from "drizzle-orm";
 import {
   pgTable, serial, integer, text, boolean, timestamp, real,
 } from "drizzle-orm/pg-core";
@@ -25,7 +25,7 @@ export const users = pgTable("users", {
   appleId:    text("apple_id").unique(),
 
   // Community preferences
-  interests:      text("interests").array().default([]),
+  interests: text("interests").array().default(sql`'{}'`),
   isExpatMember:  boolean("is_expat_member").notNull().default(true),
   isGamesMember:  boolean("is_games_member").notNull().default(false),
 
