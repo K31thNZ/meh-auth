@@ -6,8 +6,8 @@
 
 import TelegramBot from "node-telegram-bot-api";
 import { db } from "./db";
-import { users, notifications } from "@shared/schema";
-import { eq, and, gte, inArray, isNotNull } from "drizzle-orm";
+import { users, events, notifications } from "@shared/schema";
+import { eq, and, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
 import { handleTelegramStartToken } from "./telegram-link";
 
@@ -46,22 +46,16 @@ export async function notifyMatchingUsers(event: {
   venueAddress: string;
   description: string;
 }): Promise<{ sent: number; inApp: number }> {
-  // Find users with matching interest AND a telegram ID
+  // Find users who have a Telegram ID AND whose interests array contains the event category
   const matchingUsers = await db
     .select()
     .from(users)
     .where(
       and(
         isNotNull(users.telegramId),
-        // interests is a text array — check if category is included
-        // Using raw SQL for array contains
+        sql`${event.category} = ANY(${users.interests})`  // PostgreSQL array contains
       )
     );
-
-  // Filter in JS for interests match (Drizzle array contains support varies)
-  const interested = matchingUsers.filter(u =>
-    Array.isArray(u.interests) && u.interests.includes(event.category)
-  );
 
   const icon = CATEGORY_ICONS[event.category] ?? "📌";
   const date = new Date(event.date).toLocaleDateString("en-GB", {
@@ -80,7 +74,7 @@ export async function notifyMatchingUsers(event: {
   let sent = 0;
   let inApp = 0;
 
-  for (const user of interested) {
+  for (const user of matchingUsers) {
     // In-app notification (always)
     await db.insert(notifications).values({
       userId: user.id,
@@ -177,13 +171,13 @@ export async function broadcastMessage(message: string): Promise<{ sent: number;
 
 // ── Init bot ───────────────────────────────────────────────────────────────
 export function initBot(): void {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
     console.warn("[bot] TELEGRAM_BOT_TOKEN not set — Telegram bot disabled");
     return;
   }
 
-  bot = new TelegramBot(token, { polling: true });
+  bot = new TelegramBot(botToken, { polling: true });
   console.log("[bot] Telegram bot started");
 
   bot.on("polling_error", (err: any) => {
@@ -197,43 +191,50 @@ export function initBot(): void {
 
   // /start — link Telegram account to meh-auth user or prompt sign-in
   bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const telegramId = String(msg.from?.id ?? chatId);
-  const firstName = msg.from?.first_name ?? "there";
-  const token = match?.[1]?.trim();
+    const chatId = msg.chat.id;
+    const telegramId = String(msg.from?.id ?? chatId);
+    const firstName = msg.from?.first_name ?? "there";
+    const deepLinkToken = match?.[1]?.trim();
 
-  // If a token was passed, handle the deep link flow
-  if (token) {
-    await handleTelegramStartToken(chatId, telegramId, token, firstName);
-    return;
-  }
+    // If a token was passed, handle the deep link flow
+    if (deepLinkToken) {
+      if (typeof handleTelegramStartToken === "function") {
+        await handleTelegramStartToken(chatId, telegramId, deepLinkToken, firstName);
+      } else {
+        console.error("[bot] handleTelegramStartToken is not available");
+        await bot!.sendMessage(chatId,
+          "Sorry, the linking feature is temporarily unavailable. Please try again later."
+        );
+      }
+      return;
+    }
 
-  // Plain /start — check if already linked
-  const [existing] = await db
-    .select()
-    .from(users)
-    .where(eq(users.telegramId, telegramId));
+    // Plain /start — check if already linked
+    const [existing] = await db
+      .select()
+      .from(users)
+      .where(eq(users.telegramId, telegramId));
 
-  if (existing) {
-    await bot!.sendMessage(chatId,
-      `👋 Welcome back, *${existing.displayName ?? existing.username}*!\n\n` +
-      `You're subscribed to ExpatEvents notifications.\n` +
-      `Your interests: ${existing.interests?.map((i: string) => `${CATEGORY_ICONS[i] ?? ""} ${getCategoryLabel(i)}`).join(", ") || "none set yet"}\n\n` +
-      `[Update your profile](https://expatevents.org/profile)`,
-      { parse_mode: "Markdown" }
-    );
-  } else {
-    await bot!.sendMessage(chatId,
-      `👋 Hi ${firstName}! Welcome to *ExpatEvents*.\n\n` +
-      `To receive personalised event notifications, connect your account:\n\n` +
-      `1. Go to [expatevents.org](https://expatevents.org)\n` +
-      `2. Sign in and open your profile\n` +
-      `3. Tap *Connect Telegram* — you'll get a link that brings you straight back here\n\n` +
-      `Your accounts will be linked automatically.`,
-      { parse_mode: "Markdown" }
-    );
-  }
-});
+    if (existing) {
+      await bot!.sendMessage(chatId,
+        `👋 Welcome back, *${existing.displayName ?? existing.username}*!\n\n` +
+        `You're subscribed to ExpatEvents notifications.\n` +
+        `Your interests: ${existing.interests?.map((i: string) => `${CATEGORY_ICONS[i] ?? ""} ${getCategoryLabel(i)}`).join(", ") || "none set yet"}\n\n` +
+        `[Update your profile](https://expatevents.org/profile)`,
+        { parse_mode: "Markdown" }
+      );
+    } else {
+      await bot!.sendMessage(chatId,
+        `👋 Hi ${firstName}! Welcome to *ExpatEvents*.\n\n` +
+        `To receive personalised event notifications, connect your account:\n\n` +
+        `1. Go to [expatevents.org](https://expatevents.org)\n` +
+        `2. Sign in and open your profile\n` +
+        `3. Tap *Connect Telegram* — you'll get a link that brings you straight back here\n\n` +
+        `Your accounts will be linked automatically.`,
+        { parse_mode: "Markdown" }
+      );
+    }
+  });
 
   // /interests — show current interests
   bot.onText(/\/interests/, async (msg) => {
@@ -276,20 +277,56 @@ export function initBot(): void {
   // Admin: /approve_match <category> <day> <hour>
   bot.onText(/\/approve_match (\w+) (\d+) (\d+)/, async (msg, match) => {
     const telegramId = String(msg.from?.id ?? msg.chat.id);
-    if (telegramId !== process.env.ADMIN_TELEGRAM_ID) return;
+    if (telegramId !== process.env.ADMIN_TELEGRAM_ID) {
+      await bot!.sendMessage(msg.chat.id, "⛔ You are not authorized to use this command.");
+      return;
+    }
 
     const category = match?.[1];
     const day = parseInt(match?.[2] ?? "0");
     const hour = parseInt(match?.[3] ?? "0");
 
-    if (!category) return;
+    if (!category || isNaN(day) || isNaN(hour)) {
+      await bot!.sendMessage(msg.chat.id, "Invalid format. Use: /approve_match <category> <day> <hour>");
+      return;
+    }
 
-    // Find organisers for this category (users who have created events in this category)
-    // For now notify all admins and users who have listed events
-    // This is a stub — expand when host registry is wired up
+    // Find organisers who have created at least one event in this category
+    const organisers = await db
+      .select({ id: users.id, telegramId: users.telegramId })
+      .from(users)
+      .innerJoin(events, eq(events.organiserId, users.id))
+      .where(and(eq(events.category, category), isNotNull(users.telegramId)))
+      .groupBy(users.id, users.telegramId);
+
+    if (organisers.length === 0) {
+      await bot!.sendMessage(msg.chat.id,
+        `No organisers found for *${getCategoryLabel(category)}* events with a Telegram ID.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const dayName = days[day] ?? `Day ${day}`;
+    const hourStr = `${String(hour).padStart(2, "0")}:00`;
+
+    const demandMessage =
+      `${CATEGORY_ICONS[category] ?? "📌"} *Demand signal for ${getCategoryLabel(category)}*\n\n` +
+      `We've detected expats interested in *${getCategoryLabel(category)}* who are free on *${dayName} at ${hourStr}*.\n\n` +
+      `Consider hosting an event at this time!\n` +
+      `[Create an event](https://expatevents.org/create-event)`;
+
+    let notified = 0;
+    for (const org of organisers) {
+      if (org.telegramId) {
+        const ok = await sendToUser(org.telegramId, demandMessage);
+        if (ok) notified++;
+      }
+    }
+
     await bot!.sendMessage(msg.chat.id,
-      `✅ Approved. Looking for organisers for *${getCategoryLabel(category)}*...\n` +
-      `(Organiser notification coming — wire up host registry to complete this)`,
+      `✅ Approved. Sent demand signal to ${notified} organiser(s) in *${getCategoryLabel(category)}*.`,
       { parse_mode: "Markdown" }
     );
   });
