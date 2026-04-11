@@ -3,11 +3,17 @@
 // Uses the users table directly — no separate subscribers table.
 // A user becomes a "subscriber" the moment they /start the bot,
 // which links their telegramId to their meh-auth account.
+//
+// New event notification flow:
+//   1. expatevents calls POST /api/notify/event
+//   2. notifyMatchingUsers() sends admin an Approve/Decline inline keyboard
+//   3. Admin taps Approve → dispatchEventNotifications() fires to all matching users
+//   4. Admin taps Decline → dropped silently, message updated to show declined
 
 import TelegramBot from "node-telegram-bot-api";
 import { db } from "./db";
-import { users, events, notifications } from "@shared/schema";
-import { eq, and, gte, inArray, isNotNull, sql } from "drizzle-orm";
+import { users, notifications } from "@shared/schema";
+import { eq, and, isNotNull, inArray, sql } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
 import { handleTelegramStartToken } from "./telegram-link";
 
@@ -24,7 +30,36 @@ export function getBot(): TelegramBot | null {
   return bot;
 }
 
-// ── Send a Telegram message to a user by telegramId ────────────────────────
+// ── Pending approval store ────────────────────────────────────────────────
+// Keyed by a short random token embedded in callback_data.
+// Entries expire after 24 hours so the Map never grows unboundedly.
+interface PendingEvent {
+  event: {
+    id: number;
+    title: string;
+    category: string;
+    date: Date;
+    venueCity: string;
+    venueAddress: string;
+    description: string;
+  };
+  expiresAt: number;
+}
+
+const pendingApprovals = new Map<string, PendingEvent>();
+
+function generateToken(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function cleanExpired(): void {
+  const now = Date.now();
+  for (const [key, val] of pendingApprovals.entries()) {
+    if (val.expiresAt < now) pendingApprovals.delete(key);
+  }
+}
+
+// ── Send a Telegram message to a user by telegramId ──────────────────────
 export async function sendToUser(telegramId: string, text: string): Promise<boolean> {
   if (!bot) return false;
   try {
@@ -36,7 +71,57 @@ export async function sendToUser(telegramId: string, text: string): Promise<bool
   }
 }
 
-// ── Notify users whose interests match a new event ─────────────────────────
+// ── Dispatch notifications to all matching users (post-approval) ──────────
+async function dispatchEventNotifications(
+  event: PendingEvent["event"]
+): Promise<{ sent: number; inApp: number }> {
+  const matchingUsers = await db
+    .select()
+    .from(users)
+    .where(sql`${event.category} = ANY(${users.interests})`);
+
+  const icon = CATEGORY_ICONS[event.category] ?? "📌";
+  const dateStr = new Date(event.date).toLocaleDateString("en-GB", {
+    weekday: "short", day: "numeric", month: "short",
+    hour: "2-digit", minute: "2-digit",
+  });
+
+  const message =
+    `${icon} *New ${getCategoryLabel(event.category)} event*\n\n` +
+    `*${event.title}*\n` +
+    `📅 ${dateStr}\n` +
+    `📍 ${event.venueAddress}, ${event.venueCity}\n\n` +
+    `${event.description.slice(0, 200)}${event.description.length > 200 ? "…" : ""}\n\n` +
+    `[View event](https://expatevents.org/events/${event.id})`;
+
+  let sent = 0;
+  let inApp = 0;
+
+  for (const user of matchingUsers) {
+    await db.insert(notifications).values({
+      userId:   user.id,
+      type:     "new_event",
+      title:    `New ${getCategoryLabel(event.category)} event`,
+      body:     `${event.title} — ${dateStr} at ${event.venueCity}`,
+      appScope: "expat",
+      eventId:  event.id,
+      link:     `/events/${event.id}`,
+    });
+    inApp++;
+
+    if (user.telegramId) {
+      const ok = await sendToUser(user.telegramId, message);
+      if (ok) sent++;
+    }
+  }
+
+  console.log(`[bot] Event ${event.id} dispatched: ${inApp} in-app, ${sent} Telegram`);
+  return { sent, inApp };
+}
+
+// ── notifyMatchingUsers — sends admin approval prompt first ───────────────
+// Called by notify-routes.ts when expatevents publishes a new event.
+// Returns { sent: 0, inApp: 0 } immediately — actual sends happen after approval.
 export async function notifyMatchingUsers(event: {
   id: number;
   title: string;
@@ -46,59 +131,67 @@ export async function notifyMatchingUsers(event: {
   venueAddress: string;
   description: string;
 }): Promise<{ sent: number; inApp: number }> {
-  // Find users who have a Telegram ID AND whose interests array contains the event category
-  const matchingUsers = await db
-    .select()
-    .from(users)
-    .where(
-      and(
-        isNotNull(users.telegramId),
-        sql`${event.category} = ANY(${users.interests})`  // PostgreSQL array contains
-      )
-    );
+  const adminTelegramId = process.env.ADMIN_TELEGRAM_ID;
+
+  // No admin configured → dispatch immediately without approval step
+  if (!adminTelegramId || !bot) {
+    console.warn("[bot] ADMIN_TELEGRAM_ID not set — dispatching without approval");
+    return dispatchEventNotifications(event);
+  }
+
+  // Count how many users would be notified
+  const [allMatches, telegramMatches] = await Promise.all([
+    db.select({ id: users.id }).from(users)
+      .where(sql`${event.category} = ANY(${users.interests})`),
+    db.select({ id: users.id }).from(users)
+      .where(and(isNotNull(users.telegramId), sql`${event.category} = ANY(${users.interests})`)),
+  ]);
+
+  cleanExpired();
+  const token = generateToken();
+  pendingApprovals.set(token, {
+    event,
+    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+  });
 
   const icon = CATEGORY_ICONS[event.category] ?? "📌";
-  const date = new Date(event.date).toLocaleDateString("en-GB", {
+  const dateStr = new Date(event.date).toLocaleDateString("en-GB", {
     weekday: "short", day: "numeric", month: "short",
     hour: "2-digit", minute: "2-digit",
   });
 
-  const message =
-    `${icon} *New ${getCategoryLabel(event.category)} event*\n\n` +
+  const adminMessage =
+    `${icon} *New event — notification approval*\n\n` +
     `*${event.title}*\n` +
-    `📅 ${date}\n` +
-    `📍 ${event.venueAddress}, ${event.venueCity}\n\n` +
-    `${event.description.slice(0, 200)}${event.description.length > 200 ? "…" : ""}\n\n` +
-    `[View event](https://expatevents.org/events/${event.id})`;
+    `📅 ${dateStr}\n` +
+    `📍 ${event.venueAddress}, ${event.venueCity}\n` +
+    `🏷 ${getCategoryLabel(event.category)}\n\n` +
+    `*${allMatches.length}* users have this interest ` +
+    `(${telegramMatches.length} with Telegram connected).\n\n` +
+    `Approve sending notifications?`;
 
-  let sent = 0;
-  let inApp = 0;
-
-  for (const user of matchingUsers) {
-    // In-app notification (always)
-    await db.insert(notifications).values({
-      userId: user.id,
-      type: "new_event",
-      title: `New ${getCategoryLabel(event.category)} event`,
-      body: `${event.title} — ${date} at ${event.venueCity}`,
-      appScope: "expat",
-      eventId: event.id,
-      link: `/events/${event.id}`,
+  try {
+    await bot.sendMessage(adminTelegramId, adminMessage, {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ Approve", callback_data: `approve_event:${token}` },
+          { text: "❌ Decline", callback_data: `decline_event:${token}` },
+        ]],
+      },
     });
-    inApp++;
-
-    // Telegram (if connected)
-    if (user.telegramId) {
-      const ok = await sendToUser(user.telegramId, message);
-      if (ok) sent++;
-    }
+    console.log(`[bot] Event ${event.id} awaiting admin approval (token: ${token})`);
+  } catch (err: any) {
+    // Can't reach admin — fall back to immediate dispatch
+    console.error("[bot] Failed to message admin, dispatching immediately:", err.message);
+    pendingApprovals.delete(token);
+    return dispatchEventNotifications(event);
   }
 
-  console.log(`[bot] Event ${event.id}: notified ${inApp} in-app, ${sent} via Telegram`);
-  return { sent, inApp };
+  return { sent: 0, inApp: 0 };
 }
 
-// ── Notify admin of an availability match ─────────────────────────────────
+// ── Notify admin of an availability match ────────────────────────────────
 export async function notifyAdminAvailabilityMatch(match: {
   category: string;
   day: number;
@@ -124,7 +217,7 @@ export async function notifyAdminAvailabilityMatch(match: {
   await sendToUser(adminTelegramId, message);
 }
 
-// ── Notify an event organiser of a demand signal ──────────────────────────
+// ── Notify an event organiser of a demand signal ─────────────────────────
 export async function notifyOrganiserDemand(organiserId: number, match: {
   category: string;
   day: number;
@@ -149,7 +242,7 @@ export async function notifyOrganiserDemand(organiserId: number, match: {
   await sendToUser(organiser.telegramId, message);
 }
 
-// ── Broadcast to all users with a telegramId ──────────────────────────────
+// ── Broadcast to all users with a telegramId ─────────────────────────────
 export async function broadcastMessage(message: string): Promise<{ sent: number; failed: number }> {
   const allUsers = await db
     .select()
@@ -169,7 +262,7 @@ export async function broadcastMessage(message: string): Promise<{ sent: number;
   return { sent, failed };
 }
 
-// ── Init bot ───────────────────────────────────────────────────────────────
+// ── Init bot ──────────────────────────────────────────────────────────────
 export function initBot(): void {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
@@ -189,31 +282,93 @@ export function initBot(): void {
     }
   });
 
-  // /start — link Telegram account to meh-auth user or prompt sign-in
+  // ── Inline keyboard: Approve / Decline event notification ────────────────
+  bot.on("callback_query", async (query) => {
+    const adminTelegramId = process.env.ADMIN_TELEGRAM_ID;
+    const callerId = String(query.from.id);
+
+    if (callerId !== adminTelegramId) {
+      await bot!.answerCallbackQuery(query.id, { text: "⛔ Not authorised." });
+      return;
+    }
+
+    const data = query.data ?? "";
+    const chatId = query.message?.chat.id;
+    const messageId = query.message?.message_id;
+    const originalText = query.message?.text ?? "";
+
+    if (data.startsWith("approve_event:")) {
+      const token = data.replace("approve_event:", "");
+      const pending = pendingApprovals.get(token);
+
+      if (!pending) {
+        await bot!.answerCallbackQuery(query.id, {
+          text: "⚠️ This approval has expired (>24h).",
+          show_alert: true,
+        });
+        // Remove buttons so they can't be clicked again
+        if (chatId && messageId) {
+          await bot!.editMessageReplyMarkup(
+            { inline_keyboard: [] },
+            { chat_id: chatId, message_id: messageId }
+          ).catch(() => {});
+        }
+        return;
+      }
+
+      pendingApprovals.delete(token);
+      await bot!.answerCallbackQuery(query.id, { text: "Sending notifications…" });
+
+      // Show sending state while we work
+      if (chatId && messageId) {
+        await bot!.editMessageText(
+          originalText + "\n\n⏳ _Sending…_",
+          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
+        ).catch(() => {});
+      }
+
+      const { sent, inApp } = await dispatchEventNotifications(pending.event);
+
+      // Update message with final result
+      if (chatId && messageId) {
+        await bot!.editMessageText(
+          originalText + `\n\n✅ *Approved & sent* — ${sent} Telegram, ${inApp} in-app`,
+          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
+        ).catch(() => {});
+      }
+
+    } else if (data.startsWith("decline_event:")) {
+      const token = data.replace("decline_event:", "");
+      pendingApprovals.delete(token);
+
+      await bot!.answerCallbackQuery(query.id, { text: "Declined." });
+
+      if (chatId && messageId) {
+        await bot!.editMessageText(
+          originalText + "\n\n❌ *Declined* — no notifications sent.",
+          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
+        ).catch(() => {});
+      }
+    }
+  });
+
+  // /start
   bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
     const telegramId = String(msg.from?.id ?? chatId);
     const firstName = msg.from?.first_name ?? "there";
     const deepLinkToken = match?.[1]?.trim();
 
-    // If a token was passed, handle the deep link flow
     if (deepLinkToken) {
       if (typeof handleTelegramStartToken === "function") {
         await handleTelegramStartToken(chatId, telegramId, deepLinkToken, firstName);
       } else {
-        console.error("[bot] handleTelegramStartToken is not available");
-        await bot!.sendMessage(chatId,
-          "Sorry, the linking feature is temporarily unavailable. Please try again later."
-        );
+        await bot!.sendMessage(chatId, "Sorry, the linking feature is temporarily unavailable.");
       }
       return;
     }
 
-    // Plain /start — check if already linked
-    const [existing] = await db
-      .select()
-      .from(users)
-      .where(eq(users.telegramId, telegramId));
+    const [existing] = await db.select().from(users).where(eq(users.telegramId, telegramId));
 
     if (existing) {
       await bot!.sendMessage(chatId,
@@ -236,7 +391,7 @@ export function initBot(): void {
     }
   });
 
-  // /interests — show current interests
+  // /interests
   bot.onText(/\/interests/, async (msg) => {
     const telegramId = String(msg.from?.id ?? msg.chat.id);
     const [user] = await db.select().from(users).where(eq(users.telegramId, telegramId));
@@ -258,7 +413,7 @@ export function initBot(): void {
     );
   });
 
-  // /stop — unlink telegram from notifications (doesn't delete account)
+  // /stop
   bot.onText(/\/stop/, async (msg) => {
     const telegramId = String(msg.from?.id ?? msg.chat.id);
     const [user] = await db.select().from(users).where(eq(users.telegramId, telegramId));
@@ -291,17 +446,20 @@ export function initBot(): void {
       return;
     }
 
-    // Find organisers who have created at least one event in this category
     const organisers = await db
       .select({ id: users.id, telegramId: users.telegramId })
       .from(users)
-      .innerJoin(events, eq(events.organiserId, users.id))
-      .where(and(eq(events.category, category), isNotNull(users.telegramId)))
-      .groupBy(users.id, users.telegramId);
+      .where(
+        and(
+          isNotNull(users.telegramId),
+          inArray(users.role, ["host", "admin"]),
+          sql`${category} = ANY(${users.interests})`
+        )
+      );
 
     if (organisers.length === 0) {
       await bot!.sendMessage(msg.chat.id,
-        `No organisers found for *${getCategoryLabel(category)}* events with a Telegram ID.`,
+        `No hosts found for *${getCategoryLabel(category)}* with a Telegram ID connected.`,
         { parse_mode: "Markdown" }
       );
       return;
@@ -326,7 +484,7 @@ export function initBot(): void {
     }
 
     await bot!.sendMessage(msg.chat.id,
-      `✅ Approved. Sent demand signal to ${notified} organiser(s) in *${getCategoryLabel(category)}*.`,
+      `✅ Sent demand signal to ${notified} host(s) in *${getCategoryLabel(category)}*.`,
       { parse_mode: "Markdown" }
     );
   });
