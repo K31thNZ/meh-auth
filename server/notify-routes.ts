@@ -9,7 +9,7 @@ import { storage } from "./storage";
 import { db } from "./db";
 import { availabilityMatches, hosts } from "@shared/schema";
 import { eq, and } from "drizzle-orm";
-import { runAvailabilityMatcher } from "./matcher";
+import { runAvailabilityMatcher, runIncrementalMatcher } from "./matcher";
 import { z } from "zod";
 
 const notifyEventSchema = z.object({
@@ -56,6 +56,38 @@ export function registerNotifyRoutes(app: Express) {
     }
   });
 
+  // ── POST /api/notify/profile-updated ─────────────────────────────────────
+  // Called after a user saves interests or availability slots.
+  // Body: { userId: number }
+  //
+  // If userId is provided → runs the fast incremental matcher for that user
+  // only, checking their new slots against all others and notifying admin of
+  // any new matches in real time.
+  //
+  // Falls back to the full scan if no userId is given.
+  // Always responds immediately — matcher runs in the background.
+  app.post("/api/notify/profile-updated", async (req, res) => {
+    if (!validateServiceSecret(req, res)) return;
+
+    const userId = typeof req.body?.userId === "number" ? req.body.userId : null;
+
+    // Respond before the matcher runs so the user's profile save isn't delayed
+    res.json({ ok: true, message: userId ? "Incremental matcher queued" : "Full matcher queued" });
+
+    setImmediate(async () => {
+      try {
+        if (userId) {
+          await runIncrementalMatcher(userId);
+        } else {
+          await runAvailabilityMatcher();
+        }
+        console.log(`[notify] Profile-triggered matcher complete (userId: ${userId ?? "full"})`);
+      } catch (err: any) {
+        console.error("[notify] Profile-triggered matcher failed:", err.message);
+      }
+    });
+  });
+
   // ── GET /api/admin/availability-matches ───────────────────────────────────
   // Returns all availability matches for the admin to review.
   // Admin sees: category, day, hour, how many users, whether notified.
@@ -80,7 +112,6 @@ export function registerNotifyRoutes(app: Express) {
         return res.status(400).json({ error: "organiserId required" });
       }
 
-      // Get the match
       const [match] = await db
         .select()
         .from(availabilityMatches)
@@ -88,7 +119,6 @@ export function registerNotifyRoutes(app: Express) {
 
       if (!match) return res.status(404).json({ error: "Match not found" });
 
-      // Notify the organiser
       await notifyOrganiserDemand(organiserId, {
         category: match.category,
         day: match.day,
@@ -96,7 +126,6 @@ export function registerNotifyRoutes(app: Express) {
         userCount: match.userIds.length,
       });
 
-      // Mark as notified
       await db
         .update(availabilityMatches)
         .set({ notified: true })
