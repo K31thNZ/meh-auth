@@ -199,6 +199,7 @@ export async function notifyMatchingUsers(event: {
 }
 
 // ── Notify admin of an availability match ────────────────────────────────
+// Sends an inline keyboard so admin can immediately notify hosts in one tap.
 export async function notifyAdminAvailabilityMatch(match: {
   category: string;
   day: number;
@@ -209,19 +210,35 @@ export async function notifyAdminAvailabilityMatch(match: {
   const adminTelegramId = process.env.ADMIN_TELEGRAM_ID;
   if (!adminTelegramId || !bot) return;
 
-  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const dayName = days[match.day] ?? `Day ${match.day}`;
-  const hourStr = `${String(match.hour).padStart(2, "0")}:00`;
+  const dayName = DAYS[match.day] ?? `Day ${match.day}`;
+  const hourStr = fmtHour(match.hour);
   const icon = CATEGORY_ICONS[match.category] ?? "📌";
 
   const message =
-    `${icon} *Availability match detected*\n\n` +
-    `*${match.userCount} users* are interested in *${getCategoryLabel(match.category)}* ` +
-    `and are free on *${dayName} at ${hourStr}*\n\n` +
-    `Approve an organiser for this slot? Reply with:\n` +
-    `/approve_match ${match.category} ${match.day} ${match.hour}`;
+    `${icon} *Availability match — ${getCategoryLabel(match.category)}*\n\n` +
+    `*${match.userCount} user${match.userCount !== 1 ? "s" : ""}* ` +
+    `want *${getCategoryLabel(match.category)}* on *${dayName} at ${hourStr}*\n\n` +
+    `Notify hosts to create an event at this slot?`;
 
-  await sendToUser(adminTelegramId, message);
+  try {
+    await bot.sendMessage(adminTelegramId, message, {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[
+          {
+            text: "📣 Notify hosts",
+            callback_data: `notify_hosts:${match.category}:${match.day}:${match.hour}`,
+          },
+          {
+            text: "✖ Dismiss",
+            callback_data: `dismiss_match:${match.category}:${match.day}:${match.hour}`,
+          },
+        ]],
+      },
+    });
+  } catch (err: any) {
+    console.error("[bot] Failed to notify admin of match:", err.message);
+  }
 }
 
 // ── Notify an event organiser of a demand signal ─────────────────────────
@@ -353,6 +370,91 @@ export function initBot(): void {
       if (chatId && messageId) {
         await bot!.editMessageText(
           originalText + "\n\n❌ *Declined* — no notifications sent.",
+          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
+        ).catch(() => {});
+      }
+
+    } else if (data.startsWith("notify_hosts:")) {
+      // Format: notify_hosts:<category>:<day>:<hour>
+      const [, category, dayStr, hourStr] = data.split(":");
+      const day  = parseInt(dayStr);
+      const hour = parseInt(hourStr);
+
+      await bot!.answerCallbackQuery(query.id, { text: "Notifying hosts…" });
+
+      // Find host/admin users with this interest and Telegram connected
+      const organisers = await db
+        .select({ id: users.id, telegramId: users.telegramId })
+        .from(users)
+        .where(
+          and(
+            isNotNull(users.telegramId),
+            inArray(users.role, ["host", "admin"]),
+            sql`${category} = ANY(${users.interests})`
+          )
+        );
+
+      const dayName = DAYS[day] ?? `Day ${day}`;
+      const hourFmt = fmtHour(hour);
+      const icon = CATEGORY_ICONS[category] ?? "📌";
+
+      const demandMessage =
+        `${icon} *Demand signal for ${getCategoryLabel(category)}*\n\n` +
+        `Expats are looking for *${getCategoryLabel(category)}* events on *${dayName} at ${hourFmt}*.\n\n` +
+        `Consider hosting an event at this time!\n` +
+        `[Create an event](https://expatevents.org/create-event)`;
+
+      let notified = 0;
+      for (const org of organisers) {
+        if (org.telegramId) {
+          const ok = await sendToUser(org.telegramId, demandMessage);
+          if (ok) notified++;
+        }
+      }
+
+      // Mark match as notified in DB
+      await db
+        .update(availabilityMatches)
+        .set({ notified: true })
+        .where(
+          and(
+            eq(availabilityMatches.category, category),
+            eq(availabilityMatches.day, day),
+            eq(availabilityMatches.hour, hour)
+          )
+        );
+
+      if (chatId && messageId) {
+        await bot!.editMessageText(
+          originalText + `\n\n📣 *Sent* — notified ${notified} host${notified !== 1 ? "s" : ""}`,
+          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
+        ).catch(() => {});
+      }
+
+    } else if (data.startsWith("dismiss_match:")) {
+      const [, category, dayStr, hourStr] = data.split(":");
+      const day  = parseInt(dayStr);
+      const hour = parseInt(hourStr);
+
+      pendingApprovals.delete(data); // no-op but harmless
+
+      await bot!.answerCallbackQuery(query.id, { text: "Dismissed." });
+
+      // Mark as notified so it won't re-alert on next matcher run
+      await db
+        .update(availabilityMatches)
+        .set({ notified: true })
+        .where(
+          and(
+            eq(availabilityMatches.category, category),
+            eq(availabilityMatches.day, day),
+            eq(availabilityMatches.hour, hour)
+          )
+        );
+
+      if (chatId && messageId) {
+        await bot!.editMessageText(
+          originalText + "\n\n✖ _Dismissed_",
           { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
         ).catch(() => {});
       }
