@@ -12,10 +12,11 @@
 
 import TelegramBot from "node-telegram-bot-api";
 import { db } from "./db";
-import { users, notifications } from "@shared/schema";
+import { users, notifications, availabilityMatches, availabilitySlots } from "@shared/schema";
 import { eq, and, isNotNull, inArray, sql } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
 import { handleTelegramStartToken } from "./telegram-link";
+import { runAvailabilityMatcher } from "./matcher";
 
 const CATEGORY_ICONS: Record<string, string> = {
   networking: "🔗", tech: "💻", culture: "🎨", food: "🍔",
@@ -23,6 +24,12 @@ const CATEGORY_ICONS: Record<string, string> = {
   games: "🎮", business: "💼", wellness: "🧘", family: "👨‍👩‍👧",
   social: "🤝", volunteering: "🙌", other: "📌",
 };
+
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function fmtHour(h: number): string {
+  return `${String(h).padStart(2, "0")}:00`;
+}
 
 let bot: TelegramBot | null = null;
 
@@ -487,6 +494,206 @@ export function initBot(): void {
       `✅ Sent demand signal to ${notified} host(s) in *${getCategoryLabel(category)}*.`,
       { parse_mode: "Markdown" }
     );
+  });
+
+  // ── /summary (admin) ─────────────────────────────────────────────────────
+  // Shows a full breakdown of all current availability matches grouped by
+  // category, sorted by user count descending. Re-runs the matcher first so
+  // the data is always fresh when the admin asks for it.
+  bot.onText(/\/summary/, async (msg) => {
+    const telegramId = String(msg.from?.id ?? msg.chat.id);
+    if (telegramId !== process.env.ADMIN_TELEGRAM_ID) {
+      await bot!.sendMessage(msg.chat.id, "⛔ Admin only command.");
+      return;
+    }
+
+    await bot!.sendMessage(msg.chat.id, "⏳ Running matcher and compiling summary…");
+
+    try {
+      await runAvailabilityMatcher();
+    } catch (err: any) {
+      console.error("[bot] /summary matcher error:", err.message);
+    }
+
+    const matches = await db
+      .select()
+      .from(availabilityMatches)
+      .orderBy(availabilityMatches.category);
+
+    if (matches.length === 0) {
+      await bot!.sendMessage(msg.chat.id,
+        "No availability matches found yet.
+
+Users need to set their interests and availability slots at expatevents.org/profile.",
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    // Group by category
+    const byCategory: Record<string, typeof matches> = {};
+    for (const m of matches) {
+      if (!byCategory[m.category]) byCategory[m.category] = [];
+      byCategory[m.category].push(m);
+    }
+
+    // Sort categories by total user coverage (sum of userIds across slots)
+    const sortedCategories = Object.entries(byCategory)
+      .map(([cat, rows]) => ({
+        cat,
+        rows,
+        totalUsers: Math.max(...rows.map(r => r.userIds.length)),
+      }))
+      .sort((a, b) => b.totalUsers - a.totalUsers);
+
+    let text = `📊 *Availability Summary*
+${matches.length} active match${matches.length !== 1 ? "es" : ""} across ${sortedCategories.length} categories
+
+`;
+
+    for (const { cat, rows } of sortedCategories) {
+      const icon = CATEGORY_ICONS[cat] ?? "📌";
+      // Sort slots by user count desc, show top 3
+      const topSlots = [...rows]
+        .sort((a, b) => b.userIds.length - a.userIds.length)
+        .slice(0, 3);
+
+      text += `${icon} *${getCategoryLabel(cat)}*
+`;
+      for (const slot of topSlots) {
+        const notifiedMark = slot.notified ? " ✓" : "";
+        text += `  • ${DAYS[slot.day]} ${fmtHour(slot.hour)} — ${slot.userIds.length} users${notifiedMark}
+`;
+      }
+      if (rows.length > 3) {
+        text += `  _…and ${rows.length - 3} more slots_
+`;
+      }
+      text += "
+";
+    }
+
+    text += `_Use /matches <category> for details_
+_Use /approve\_match <category> <day> <hour> to notify hosts_`;
+
+    // Telegram messages max 4096 chars — split if needed
+    if (text.length <= 4096) {
+      await bot!.sendMessage(msg.chat.id, text, { parse_mode: "Markdown" });
+    } else {
+      const chunks = text.match(/[\s\S]{1,4000}/g) ?? [];
+      for (const chunk of chunks) {
+        await bot!.sendMessage(msg.chat.id, chunk, { parse_mode: "Markdown" });
+      }
+    }
+  });
+
+  // ── /matches [category] (admin) ───────────────────────────────────────────
+  // Drill into a specific category and see every slot with user count.
+  // If no category given, lists available categories.
+  bot.onText(/\/matches(?:\s+(\w+))?/, async (msg, match) => {
+    const telegramId = String(msg.from?.id ?? msg.chat.id);
+    if (telegramId !== process.env.ADMIN_TELEGRAM_ID) {
+      await bot!.sendMessage(msg.chat.id, "⛔ Admin only command.");
+      return;
+    }
+
+    const category = match?.[1]?.toLowerCase().trim();
+
+    if (!category) {
+      // List all categories that have matches
+      const allMatches = await db.select({ category: availabilityMatches.category }).from(availabilityMatches);
+      const categories = [...new Set(allMatches.map(m => m.category))].sort();
+
+      if (categories.length === 0) {
+        await bot!.sendMessage(msg.chat.id, "No matches found. Try /summary first.");
+        return;
+      }
+
+      const list = categories
+        .map(c => `${CATEGORY_ICONS[c] ?? "📌"} /matches\_${c}`)
+        .join("
+");
+
+      await bot!.sendMessage(msg.chat.id,
+        `*Categories with availability matches:*
+
+${list}`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const rows = await db
+      .select()
+      .from(availabilityMatches)
+      .where(sql`${availabilityMatches.category} = ${category}`)
+      .orderBy(availabilityMatches.day, availabilityMatches.hour);
+
+    if (rows.length === 0) {
+      await bot!.sendMessage(msg.chat.id,
+        `No matches found for *${getCategoryLabel(category)}*.
+
+Try /matches to see available categories.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const icon = CATEGORY_ICONS[category] ?? "📌";
+    let text = `${icon} *${getCategoryLabel(category)} — all slots*
+
+`;
+
+    // Group by day
+    const byDay: Record<number, typeof rows> = {};
+    for (const row of rows) {
+      if (!byDay[row.day]) byDay[row.day] = [];
+      byDay[row.day].push(row);
+    }
+
+    for (const day of [1, 2, 3, 4, 5, 6, 0]) { // Mon–Sun order
+      if (!byDay[day]) continue;
+      text += `*${DAYS[day]}*
+`;
+      const sorted = byDay[day].sort((a, b) => a.hour - b.hour);
+      for (const slot of sorted) {
+        const bar = "█".repeat(Math.min(slot.userIds.length, 10));
+        const notifiedMark = slot.notified ? " ✓ notified" : "";
+        text += `  ${fmtHour(slot.hour)}  ${bar} ${slot.userIds.length} users${notifiedMark}
+`;
+      }
+      text += "
+";
+    }
+
+    text += `_/approve\_match ${category} <day 0-6> <hour> to notify hosts_`;
+
+    await bot!.sendMessage(msg.chat.id, text, { parse_mode: "Markdown" });
+  });
+
+  // ── /runmatcher (admin) ───────────────────────────────────────────────────
+  // Manually re-run the matcher and report how many matches were found.
+  bot.onText(/\/runmatcher/, async (msg) => {
+    const telegramId = String(msg.from?.id ?? msg.chat.id);
+    if (telegramId !== process.env.ADMIN_TELEGRAM_ID) {
+      await bot!.sendMessage(msg.chat.id, "⛔ Admin only command.");
+      return;
+    }
+
+    await bot!.sendMessage(msg.chat.id, "⏳ Running availability matcher…");
+
+    try {
+      await runAvailabilityMatcher();
+      const count = await db.$count(availabilityMatches);
+      await bot!.sendMessage(msg.chat.id,
+        `✅ Matcher complete — *${count}* active match${count !== 1 ? "es" : ""} found.
+
+Use /summary for a full breakdown.`,
+        { parse_mode: "Markdown" }
+      );
+    } catch (err: any) {
+      await bot!.sendMessage(msg.chat.id, `❌ Matcher failed: ${err.message}`);
+    }
   });
 
   console.log("[bot] Bot commands registered");
