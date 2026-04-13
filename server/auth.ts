@@ -10,6 +10,8 @@ import { Strategy as YandexStrategy } from "passport-yandex";
 import { scrypt, randomBytes, timingSafeEqual, createHash, createHmac } from "crypto";
 import { promisify } from "util";
 import { storage } from "./storage";
+import { runIncrementalMatcher } from "./matcher";
+import { sendToUser } from "./bot";
 import type { Express } from "express";
 
 const scryptAsync = promisify(scrypt);
@@ -109,17 +111,6 @@ export function setupPassport() {
       } catch (err) { return done(err as Error); }
     }));
   }
-
-  // ── Apple (uncomment when credentials are ready) ───────────────────────
-  // import AppleStrategy from "passport-apple";
-  // passport.use(new AppleStrategy({
-  //   clientID:         process.env.APPLE_CLIENT_ID!,
-  //   teamID:           process.env.APPLE_TEAM_ID!,
-  //   keyID:            process.env.APPLE_KEY_ID!,
-  //   privateKeyString: process.env.APPLE_PRIVATE_KEY!,
-  //   callbackURL:      `${process.env.AUTH_SERVICE_URL}/api/auth/apple/callback`,
-  //   scope:            ["name", "email"],
-  // }, async (_at, _rt, _it, profile, done) => { ... }));
 }
 
 // ── Register all auth routes ───────────────────────────────────────────────
@@ -203,7 +194,6 @@ export function registerAuthRoutes(app: Express) {
         if (err) return next(err);
         let returnTo = (req.session as any).returnTo ?? getAllowedOrigins()[0];
         delete (req.session as any).returnTo;
-        // Add justLoggedIn flag for Telegram redirect as well
         const separator = returnTo.includes('?') ? '&' : '?';
         returnTo = `${returnTo}${separator}justLoggedIn=true`;
         res.redirect(returnTo);
@@ -211,47 +201,114 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
-  // ── Apple (uncomment when credentials are ready) ─────────────────────────
-  // app.get("/api/auth/apple", passport.authenticate("apple"));
-  // app.post("/api/auth/apple/callback",
-  //   passport.authenticate("apple", { failureRedirect: buildFailureUrl("apple") }),
-  //   (req, res) => res.redirect(getReturnTo(req))
-  // );
-
   // ── User preferences ──────────────────────────────────────────────────────
+
+  // PATCH /api/user/interests
+  // After saving:
+  //   1. Runs the incremental matcher (admin notified of new 2+ matches)
+  //   2. Sends the user their next upcoming event that matches any interest
   app.patch("/api/user/interests", requireAuth, async (req, res, next) => {
     try {
-      const user = await storage.updateUser((req.user as any).id, { interests: req.body.interests });
+      const userId = (req.user as any).id;
+      const interests: string[] = req.body.interests ?? [];
+      const user = await storage.updateUser(userId, { interests });
       res.json(sanitize(user!));
+
+      setImmediate(async () => {
+        // Run availability matcher
+        runIncrementalMatcher(userId).catch(err =>
+          console.error("[matcher] interests trigger failed:", err.message)
+        );
+
+        // Send next matching event via Telegram if user is connected
+        const fresh = await storage.getUser(userId);
+        if (!fresh?.telegramId || !interests.length) return;
+
+        try {
+          const expatUrl = process.env.EXPAT_EVENTS_URL ?? "https://expatevents.org";
+          const res2 = await fetch(`${expatUrl}/api/events`);
+          if (!res2.ok) return;
+
+          const events: any[] = await res2.json();
+          const now = Date.now();
+
+          // Find the soonest upcoming published event matching any interest
+          const match = events
+            .filter(e =>
+              e.published &&
+              new Date(e.date).getTime() > now &&
+              (interests.includes(e.category) || interests.includes(e.category2))
+            )
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())[0];
+
+          if (!match) return;
+
+          const dateStr = new Date(match.date).toLocaleDateString("en-GB", {
+            weekday: "short", day: "numeric", month: "short",
+            hour: "2-digit", minute: "2-digit",
+          });
+
+          const CATEGORY_ICONS: Record<string, string> = {
+            networking: "🔗", tech: "💻", culture: "🎨", food: "🍔",
+            sports: "⚽", music: "🎵", language: "🌍", outdoor: "🏕️",
+            games: "🎮", business: "💼", wellness: "🧘", family: "👨‍👩‍👧",
+            social: "🤝", volunteering: "🙌", other: "📌",
+          };
+          const icon = CATEGORY_ICONS[match.category] ?? "📌";
+
+          await sendToUser(
+            fresh.telegramId,
+            `${icon} *Here\'s your next event*\n\n` +
+            `*${match.title}*\n` +
+            `📅 ${dateStr}\n` +
+            `📍 ${match.venueAddress}, ${match.venueCity}\n\n` +
+            `[View & get tickets](${expatUrl}/events/${match.id})`
+          );
+        } catch (err: any) {
+          console.error("[interests] Failed to send next event:", err.message);
+        }
+      });
     } catch (err) { next(err); }
   });
 
   app.patch("/api/user/profile", requireAuth, async (req, res, next) => {
-  try {
-    const { displayName, avatarUrl, telegramId } = req.body;
-    const updates: Record<string, any> = {};
-    if (displayName !== undefined) updates.displayName = displayName;
-    if (avatarUrl !== undefined) updates.avatarUrl = avatarUrl;
-    if (telegramId !== undefined) {
-      const tid = String(telegramId).trim();
-      if (!/^\d+$/.test(tid)) {
-        return res.status(400).json({ error: "telegramId must be a numeric string" });
+    try {
+      const { displayName, avatarUrl, telegramId } = req.body;
+      const updates: Record<string, any> = {};
+      if (displayName !== undefined) updates.displayName = displayName;
+      if (avatarUrl !== undefined) updates.avatarUrl = avatarUrl;
+      if (telegramId !== undefined) {
+        const tid = String(telegramId).trim();
+        if (!/^\d+$/.test(tid)) {
+          return res.status(400).json({ error: "telegramId must be a numeric string" });
+        }
+        updates.telegramId = tid;
       }
-      updates.telegramId = tid;
-    }
-    const user = await storage.updateUser((req.user as any).id, updates);
-    res.json(sanitize(user!));
-  } catch (err) { next(err); }
-});
+      const user = await storage.updateUser((req.user as any).id, updates);
+      res.json(sanitize(user!));
+    } catch (err) { next(err); }
+  });
+
   // ── Availability ──────────────────────────────────────────────────────────
+
   app.get("/api/availability", requireAuth, async (req, res) => {
     res.json(await storage.getUserSlots((req.user as any).id));
   });
 
+  // PUT /api/availability
+  // After saving slots, runs the incremental matcher in the background.
   app.put("/api/availability", requireAuth, async (req, res, next) => {
     try {
-      await storage.setUserSlots((req.user as any).id, req.body.slots);
+      const userId = (req.user as any).id;
+      await storage.setUserSlots(userId, req.body.slots);
       res.json({ ok: true });
+
+      // Fire-and-forget — never delays the response
+      setImmediate(() => {
+        runIncrementalMatcher(userId).catch(err =>
+          console.error("[matcher] availability trigger failed:", err.message)
+        );
+      });
     } catch (err) { next(err); }
   });
 
@@ -374,7 +431,6 @@ function storeReturnTo(req: any) {
 function getReturnTo(req: any): string {
   let r = (req.session as any).returnTo ?? getAllowedOrigins()[0] ?? "/";
   delete (req.session as any).returnTo;
-  // Add justLoggedIn flag
   const separator = r.includes('?') ? '&' : '?';
   r = `${r}${separator}justLoggedIn=true`;
   return r;
