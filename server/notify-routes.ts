@@ -56,6 +56,39 @@ export function registerNotifyRoutes(app: Express) {
     }
   });
 
+  // ── POST /api/notify/send ────────────────────────────────────────────────
+  // Sends a Telegram message to a specific user identified by their meh-auth
+  // numeric user ID. Used by expatevents for ticket reminders and any other
+  // per-user notifications where the sender knows the user ID.
+  // Body: { userId: string | number, message: string }
+  app.post("/api/notify/send", async (req, res) => {
+    if (!validateServiceSecret(req, res)) return;
+
+    const { userId, message } = req.body;
+
+    if (!userId || !message) {
+      return res.status(400).json({ error: "userId and message are required" });
+    }
+
+    try {
+      const [user] = await db
+        .select({ telegramId: users.telegramId })
+        .from(users)
+        .where(eq(users.id, Number(userId)));
+
+      if (!user?.telegramId) {
+        // User exists but has no Telegram connected — not an error, just skip
+        return res.json({ ok: true, sent: false, reason: "no_telegram" });
+      }
+
+      const ok = await sendToUser(user.telegramId, message);
+      res.json({ ok: true, sent: ok });
+    } catch (err: any) {
+      console.error("[notify/send]", err.message);
+      res.status(500).json({ error: "Failed to send message" });
+    }
+  });
+
   // ── POST /api/notify/profile-updated ─────────────────────────────────────
   // Called after a user saves interests or availability slots.
   // Body: { userId: number }
