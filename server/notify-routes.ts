@@ -4,10 +4,10 @@
 
 import type { Express } from "express";
 import { requireAuth, requireAdmin } from "./auth";
-import { notifyMatchingUsers, notifyOrganiserDemand } from "./bot";
+import { notifyMatchingUsers, notifyOrganiserDemand, sendToUser } from "./bot";
 import { storage } from "./storage";
 import { db } from "./db";
-import { availabilityMatches, hosts } from "@shared/schema";
+import { availabilityMatches, hosts, users } from "@shared/schema";
 import { eq, and } from "drizzle-orm";
 import { runAvailabilityMatcher, runIncrementalMatcher } from "./matcher";
 import { z } from "zod";
@@ -146,6 +146,37 @@ export function registerNotifyRoutes(app: Express) {
       res.json({ ok: true, message: "Matcher ran successfully" });
     } catch (err) {
       res.status(500).json({ error: "Matcher failed" });
+    }
+  });
+
+  // ── POST /api/internal/send-message ──────────────────────────────────────
+  // Called by expatevents to deliver a Telegram message to a user by their
+  // meh-auth numeric userId. Used for ticket reminders and other expatevents
+  // notifications that need to reach the user's Telegram.
+  // Body: { userId: number, message: string }
+  app.post("/api/internal/send-message", async (req, res) => {
+    if (!validateServiceSecret(req, res)) return;
+
+    const { userId, message } = req.body;
+    if (!userId || !message) {
+      return res.status(400).json({ error: "userId and message are required" });
+    }
+
+    try {
+      const [user] = await db
+        .select({ telegramId: users.telegramId })
+        .from(users)
+        .where(eq(users.id, Number(userId)));
+
+      if (!user?.telegramId) {
+        return res.json({ ok: false, reason: "no_telegram" });
+      }
+
+      const sent = await sendToUser(user.telegramId, message);
+      res.json({ ok: sent });
+    } catch (err: any) {
+      console.error("[send-message]", err);
+      res.status(500).json({ error: err.message });
     }
   });
 
