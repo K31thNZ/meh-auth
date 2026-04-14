@@ -624,9 +624,9 @@ export function initBot(): void {
 
     if (matches.length === 0) {
       await bot!.sendMessage(msg.chat.id,
-        "No availability matches found yet."
+        `No availability matches found yet.
 
-//Users need to set their interests and availability slots at expatevents.org/profile.",
+Users need to set their interests and availability slots at expatevents.org/profile.`,
         { parse_mode: "Markdown" }
       );
       return;
@@ -671,8 +671,7 @@ ${matches.length} active match${matches.length !== 1 ? "es" : ""} across ${sorte
         text += `  _…and ${rows.length - 3} more slots_
 `;
       }
-      text += "
-";
+      text += "\n";
     }
 
     text += `_Use /matches <category> for details_
@@ -713,8 +712,7 @@ _Use /approve\_match <category> <day> <hour> to notify hosts_`;
 
       const list = categories
         .map(c => `${CATEGORY_ICONS[c] ?? "📌"} /matches\_${c}`)
-        .join("
-");
+        .join("\n");
 
       await bot!.sendMessage(msg.chat.id,
         `*Categories with availability matches:*
@@ -764,8 +762,7 @@ Try /matches to see available categories.`,
         text += `  ${fmtHour(slot.hour)}  ${bar} ${slot.userIds.length} users${notifiedMark}
 `;
       }
-      text += "
-";
+      text += "\n";
     }
 
     text += `_/approve\_match ${category} <day 0-6> <hour> to notify hosts_`;
