@@ -9,8 +9,7 @@ import cors from "cors";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 import pg from "pg";
-import bcrypt from "bcryptjs";
-import { setupPassport, registerAuthRoutes } from "./auth";
+import { hashPassword, comparePasswords, setupPassport, registerAuthRoutes } from "./auth";
 import { db } from "./db";
 import { users } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -571,7 +570,6 @@ registerNotifyRoutes(app);
 registerTelegramLinkRoutes(app);
 
 // ── GET /api/admin/users ───────────────────────────────────────────────────
-// Returns all users. Accepts an admin session OR a valid SERVICE_SECRET header.
 const VALID_ROLES = ["free", "premium", "host", "curator", "admin"];
 
 function isAdminOrService(req: any): boolean {
@@ -624,6 +622,8 @@ app.patch("/api/admin/users/:id/role", async (req: any, res: any) => {
 });
 
 // ── POST /api/auth/change-password ────────────────────────────────────────
+// For users who already have a password. Uses scrypt via comparePasswords/hashPassword
+// from auth.ts — NOT bcrypt (passwords are stored as scrypt hex.salt format).
 app.post("/api/auth/change-password", async (req: any, res: any) => {
   if (!req.isAuthenticated?.() || !req.user) {
     return res.status(401).json({ error: "Not authenticated" });
@@ -641,13 +641,47 @@ app.post("/api/auth/change-password", async (req: any, res: any) => {
   try {
     const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
     if (!user?.password) {
-      return res.status(400).json({ error: "No password set on this account — use OAuth sign-in." });
+      return res.status(400).json({ error: "No password set on this account — use Set Password instead." });
     }
-    const valid = await bcrypt.compare(currentPassword, user.password);
+
+    // comparePasswords uses scrypt — matches how hashPassword stores them
+    const valid = await comparePasswords(currentPassword, user.password);
     if (!valid) {
       return res.status(400).json({ error: "Current password is incorrect" });
     }
-    const hashed = await bcrypt.hash(newPassword, 12);
+
+    const hashed = await hashPassword(newPassword);
+    await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/auth/set-password ───────────────────────────────────────────
+// For users with no password (magic code login, OAuth).
+// Does NOT require a current password — only works when user.password is null.
+app.post("/api/auth/set-password", async (req: any, res: any) => {
+  if (!req.isAuthenticated?.() || !req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const { newPassword } = req.body;
+
+  if (!newPassword) {
+    return res.status(400).json({ error: "newPassword is required" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters" });
+  }
+
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
+    if (user?.password) {
+      return res.status(400).json({ error: "Account already has a password. Use Change Password instead." });
+    }
+
+    const hashed = await hashPassword(newPassword);
     await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
     res.json({ ok: true });
   } catch (err: any) {
