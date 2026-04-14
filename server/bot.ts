@@ -624,7 +624,7 @@ export function initBot(): void {
 
     if (matches.length === 0) {
       await bot!.sendMessage(msg.chat.id,
-        "No availability matches found yet.
+        "No availability matches found yet."
 
 Users need to set their interests and availability slots at expatevents.org/profile.",
         { parse_mode: "Markdown" }
