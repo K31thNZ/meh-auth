@@ -397,7 +397,9 @@ export function requireAdmin(req: any, res: any, next: any) {
 // ── Helpers ────────────────────────────────────────────────────────────────
 function sanitize(user: any) {
   const { password, ...safe } = user;
-  return safe;
+  // Add hasPassword flag so the frontend can show "Set" vs "Change" without
+  // ever sending the actual hash to the client
+  return { ...safe, hasPassword: !!password };
 }
 
 function slugify(str: string) {
