@@ -245,7 +245,7 @@ export async function sendMatchReport(matches: {
     text += `${icon} *${getCategoryLabel(cat)}*
 `;
     for (const slot of topSlots) {
-      const dayName = DAYS[slot.day] ?? \`Day \${slot.day}\`;
+      const dayName = DAYS[slot.day] ?? `Day ${slot.day}`;
       text += \`  • \${dayName} \${fmtHour(slot.hour)} — \${slot.userCount} user\${slot.userCount !== 1 ? "s" : ""}
 \`;
     }
