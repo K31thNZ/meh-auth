@@ -246,21 +246,20 @@ export async function sendMatchReport(matches: {
 `;
     for (const slot of topSlots) {
       const dayName = DAYS[slot.day] ?? `Day ${slot.day}`;
-      text += `  • ${dayName} ${fmtHour(slot.hour)} — \${slot.userCount} user\${slot.userCount !== 1 ? "s" : ""}
-\`;
+      text += `  • ${dayName} ${fmtHour(slot.hour)} — ${slot.userCount} user${slot.userCount !== 1 ? "s" : ""}
+`;
     }
-    if (rows.length > 3) text += \`  _…+\${rows.length - 3} more slots_
-\`;
-    text += "
-";
+    if (rows.length > 3) text += `  _…+${rows.length - 3} more slots_
+`;
+    text += "\n";
   }
   text += "_Tap a row below to notify hosts or dismiss_";
 
   // Build one button row per top match (max 10 to avoid Telegram limits)
   const topMatches = [...matches].sort((a, b) => b.userCount - a.userCount).slice(0, 10);
   const inline_keyboard = topMatches.map(m => [{
-    text: \`\${CATEGORY_ICONS[m.category] ?? "📌"} \${getCategoryLabel(m.category)} \${DAYS[m.day]} \${fmtHour(m.hour)} (\${m.userCount})\`,
-    callback_data: \`match_action:\${m.category}:\${m.day}:\${m.hour}\`,
+    text: `${CATEGORY_ICONS[m.category] ?? "📌"} ${getCategoryLabel(m.category)} ${DAYS[m.day]} ${fmtHour(m.hour)} (${m.userCount})`,
+    callback_data: `match_action:${m.category}:${m.day}:${m.hour}`,
   }]);
 
   const existing = matchReportMessages.get(adminTelegramId);
@@ -285,7 +284,7 @@ export async function sendMatchReport(matches: {
         messageId: sent.message_id,
       });
     }
-    console.log(\`[bot] Match report sent/updated (\${matches.length} matches)\`);
+    console.log(`[bot] Match report sent/updated (${matches.length} matches)`);
   } catch (err: any) {
     // If the message was deleted by admin, clear stored ID and try fresh
     if (err?.message?.includes("message to edit not found") || err?.message?.includes("MESSAGE_ID_INVALID")) {
@@ -349,6 +348,9 @@ export async function broadcastMessage(message: string): Promise<{ sent: number;
 
   return { sent, failed };
 }
+
+// Store for match report message IDs (to enable editing)
+const matchReportMessages = new Map<string, { chatId: number; messageId: number }>();
 
 // ── Init bot ──────────────────────────────────────────────────────────────
 export function initBot(): void {
@@ -526,7 +528,7 @@ export function initBot(): void {
       if (chatId && messageId) {
         await bot!.deleteMessage(chatId, messageId).catch(() => {});
       }
-    }    }
+    }
   });
 
   // /start
@@ -692,9 +694,7 @@ export function initBot(): void {
 
     if (matches.length === 0) {
       await bot!.sendMessage(msg.chat.id,
-        "No availability matches found yet.
-
-Users need to set their interests and availability slots at expatevents.org/profile.",
+        "No availability matches found yet.\n\nUsers need to set their interests and availability slots at expatevents.org/profile.",
         { parse_mode: "Markdown" }
       );
       return;
@@ -716,10 +716,7 @@ Users need to set their interests and availability slots at expatevents.org/prof
       }))
       .sort((a, b) => b.totalUsers - a.totalUsers);
 
-    let text = `📊 *Availability Summary*
-${matches.length} active match${matches.length !== 1 ? "es" : ""} across ${sortedCategories.length} categories
-
-`;
+    let text = `📊 *Availability Summary*\n${matches.length} active match${matches.length !== 1 ? "es" : ""} across ${sortedCategories.length} categories\n\n`;
 
     for (const { cat, rows } of sortedCategories) {
       const icon = CATEGORY_ICONS[cat] ?? "📌";
@@ -728,23 +725,18 @@ ${matches.length} active match${matches.length !== 1 ? "es" : ""} across ${sorte
         .sort((a, b) => b.userIds.length - a.userIds.length)
         .slice(0, 3);
 
-      text += `${icon} *${getCategoryLabel(cat)}*
-`;
+      text += `${icon} *${getCategoryLabel(cat)}*\n`;
       for (const slot of topSlots) {
         const notifiedMark = slot.notified ? " ✓" : "";
-        text += `  • ${DAYS[slot.day]} ${fmtHour(slot.hour)} — ${slot.userIds.length} users${notifiedMark}
-`;
+        text += `  • ${DAYS[slot.day]} ${fmtHour(slot.hour)} — ${slot.userIds.length} users${notifiedMark}\n`;
       }
       if (rows.length > 3) {
-        text += `  _…and ${rows.length - 3} more slots_
-`;
+        text += `  _…and ${rows.length - 3} more slots_\n`;
       }
-      text += "
-";
+      text += "\n";
     }
 
-    text += `_Use /matches <category> for details_
-_Use /approve\_match <category> <day> <hour> to notify hosts_`;
+    text += `_Use /matches <category> for details_\n_Use /approve\\_match <category> <day> <hour> to notify hosts_`;
 
     // Telegram messages max 4096 chars — split if needed
     if (text.length <= 4096) {
@@ -780,14 +772,11 @@ _Use /approve\_match <category> <day> <hour> to notify hosts_`;
       }
 
       const list = categories
-        .map(c => `${CATEGORY_ICONS[c] ?? "📌"} /matches\_${c}`)
-        .join("
-");
+        .map(c => `${CATEGORY_ICONS[c] ?? "📌"} /matches\\_${c}`)
+        .join("\n");
 
       await bot!.sendMessage(msg.chat.id,
-        `*Categories with availability matches:*
-
-${list}`,
+        `*Categories with availability matches:*\n\n${list}`,
         { parse_mode: "Markdown" }
       );
       return;
@@ -801,18 +790,14 @@ ${list}`,
 
     if (rows.length === 0) {
       await bot!.sendMessage(msg.chat.id,
-        `No matches found for *${getCategoryLabel(category)}*.
-
-Try /matches to see available categories.`,
+        `No matches found for *${getCategoryLabel(category)}*.\n\nTry /matches to see available categories.`,
         { parse_mode: "Markdown" }
       );
       return;
     }
 
     const icon = CATEGORY_ICONS[category] ?? "📌";
-    let text = `${icon} *${getCategoryLabel(category)} — all slots*
-
-`;
+    let text = `${icon} *${getCategoryLabel(category)} — all slots*\n\n`;
 
     // Group by day
     const byDay: Record<number, typeof rows> = {};
@@ -823,20 +808,17 @@ Try /matches to see available categories.`,
 
     for (const day of [1, 2, 3, 4, 5, 6, 0]) { // Mon–Sun order
       if (!byDay[day]) continue;
-      text += `*${DAYS[day]}*
-`;
+      text += `*${DAYS[day]}*\n`;
       const sorted = byDay[day].sort((a, b) => a.hour - b.hour);
       for (const slot of sorted) {
         const bar = "█".repeat(Math.min(slot.userIds.length, 10));
         const notifiedMark = slot.notified ? " ✓ notified" : "";
-        text += `  ${fmtHour(slot.hour)}  ${bar} ${slot.userIds.length} users${notifiedMark}
-`;
+        text += `  ${fmtHour(slot.hour)}  ${bar} ${slot.userIds.length} users${notifiedMark}\n`;
       }
-      text += "
-";
+      text += "\n";
     }
 
-    text += `_/approve\_match ${category} <day 0-6> <hour> to notify hosts_`;
+    text += `_/approve\\_match ${category} <day 0-6> <hour> to notify hosts_`;
 
     await bot!.sendMessage(msg.chat.id, text, { parse_mode: "Markdown" });
   });
@@ -856,9 +838,7 @@ Try /matches to see available categories.`,
       await runAvailabilityMatcher();
       const count = await db.$count(availabilityMatches);
       await bot!.sendMessage(msg.chat.id,
-        `✅ Matcher complete — *${count}* active match${count !== 1 ? "es" : ""} found.
-
-Use /summary for a full breakdown.`,
+        `✅ Matcher complete — *${count}* active match${count !== 1 ? "es" : ""} found.\n\nUse /summary for a full breakdown.`,
         { parse_mode: "Markdown" }
       );
     } catch (err: any) {
