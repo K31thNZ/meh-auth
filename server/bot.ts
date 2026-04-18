@@ -246,7 +246,7 @@ export async function sendMatchReport(matches: {
 `;
     for (const slot of topSlots) {
       const dayName = DAYS[slot.day] ?? `Day ${slot.day}`;
-      text += \`  • \${dayName} \${fmtHour(slot.hour)} — \${slot.userCount} user\${slot.userCount !== 1 ? "s" : ""}
+      text += `  • ${dayName} ${fmtHour(slot.hour)} — \${slot.userCount} user\${slot.userCount !== 1 ? "s" : ""}
 \`;
     }
     if (rows.length > 3) text += \`  _…+\${rows.length - 3} more slots_
