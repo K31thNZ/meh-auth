@@ -198,46 +198,110 @@ export async function notifyMatchingUsers(event: {
   return { sent: 0, inApp: 0 };
 }
 
-// ── Notify admin of an availability match ────────────────────────────────
-// Sends an inline keyboard so admin can immediately notify hosts in one tap.
-export async function notifyAdminAvailabilityMatch(match: {
+// ── Match report ──────────────────────────────────────────────────────────
+// Called by matcher.ts ONCE with all current matches, not once per match.
+// Sends a single summary message to admin (or edits the previous one in place).
+// Each row has its own Notify / Dismiss button pair.
+//
+// Old signature notifyAdminAvailabilityMatch() is kept as a no-op for
+// any code that still calls it — the real work is done by sendMatchReport().
+export async function notifyAdminAvailabilityMatch(_match: {
+  category: string; day: number; hour: number; userCount: number; userIds: number[];
+}): Promise<void> {
+  // Individual-match notifications are suppressed.
+  // The full report is sent by sendMatchReport() from matcher.ts.
+}
+
+export async function sendMatchReport(matches: {
   category: string;
   day: number;
   hour: number;
   userCount: number;
   userIds: number[];
-}): Promise<void> {
+}[]): Promise<void> {
   const adminTelegramId = process.env.ADMIN_TELEGRAM_ID;
   if (!adminTelegramId || !bot) return;
+  if (matches.length === 0) return;
 
-  const dayName = DAYS[match.day] ?? `Day ${match.day}`;
-  const hourStr = fmtHour(match.hour);
-  const icon = CATEGORY_ICONS[match.category] ?? "📌";
+  // Build the report text
+  // Group by category, sorted by peak user count desc
+  const byCat: Record<string, typeof matches> = {};
+  for (const m of matches) {
+    if (!byCat[m.category]) byCat[m.category] = [];
+    byCat[m.category].push(m);
+  }
+  const sortedCats = Object.entries(byCat)
+    .sort((a, b) => Math.max(...b[1].map(m => m.userCount)) - Math.max(...a[1].map(m => m.userCount)));
 
-  const message =
-    `${icon} *Availability match — ${getCategoryLabel(match.category)}*\n\n` +
-    `*${match.userCount} user${match.userCount !== 1 ? "s" : ""}* ` +
-    `want *${getCategoryLabel(match.category)}* on *${dayName} at ${hourStr}*\n\n` +
-    `Notify hosts to create an event at this slot?`;
+  let text = `📊 *Availability Report* — ${matches.length} match${matches.length !== 1 ? "es" : ""}
+`;
+  text += `_${new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}_
+
+`;
+
+  for (const [cat, rows] of sortedCats) {
+    const icon = CATEGORY_ICONS[cat] ?? "📌";
+    const topSlots = [...rows].sort((a, b) => b.userCount - a.userCount).slice(0, 3);
+    text += `${icon} *${getCategoryLabel(cat)}*
+`;
+    for (const slot of topSlots) {
+      const dayName = DAYS[slot.day] ?? \`Day \${slot.day}\`;
+      text += \`  • \${dayName} \${fmtHour(slot.hour)} — \${slot.userCount} user\${slot.userCount !== 1 ? "s" : ""}
+\`;
+    }
+    if (rows.length > 3) text += \`  _…+\${rows.length - 3} more slots_
+\`;
+    text += "
+";
+  }
+  text += "_Tap a row below to notify hosts or dismiss_";
+
+  // Build one button row per top match (max 10 to avoid Telegram limits)
+  const topMatches = [...matches].sort((a, b) => b.userCount - a.userCount).slice(0, 10);
+  const inline_keyboard = topMatches.map(m => [{
+    text: \`\${CATEGORY_ICONS[m.category] ?? "📌"} \${getCategoryLabel(m.category)} \${DAYS[m.day]} \${fmtHour(m.hour)} (\${m.userCount})\`,
+    callback_data: \`match_action:\${m.category}:\${m.day}:\${m.hour}\`,
+  }]);
+
+  const existing = matchReportMessages.get(adminTelegramId);
 
   try {
-    await bot.sendMessage(adminTelegramId, message, {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [[
-          {
-            text: "📣 Notify hosts",
-            callback_data: `notify_hosts:${match.category}:${match.day}:${match.hour}`,
-          },
-          {
-            text: "✖ Dismiss",
-            callback_data: `dismiss_match:${match.category}:${match.day}:${match.hour}`,
-          },
-        ]],
-      },
-    });
+    if (existing) {
+      // Edit the previous report message in place
+      await bot.editMessageText(text, {
+        chat_id:    existing.chatId,
+        message_id: existing.messageId,
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard },
+      });
+    } else {
+      // First time — send a new message and store its ID
+      const sent = await bot.sendMessage(adminTelegramId, text, {
+        parse_mode:   "Markdown",
+        reply_markup: { inline_keyboard },
+      });
+      matchReportMessages.set(adminTelegramId, {
+        chatId:    sent.chat.id,
+        messageId: sent.message_id,
+      });
+    }
+    console.log(\`[bot] Match report sent/updated (\${matches.length} matches)\`);
   } catch (err: any) {
-    console.error("[bot] Failed to notify admin of match:", err.message);
+    // If the message was deleted by admin, clear stored ID and try fresh
+    if (err?.message?.includes("message to edit not found") || err?.message?.includes("MESSAGE_ID_INVALID")) {
+      matchReportMessages.delete(adminTelegramId);
+      try {
+        const sent = await bot.sendMessage(adminTelegramId, text, {
+          parse_mode:   "Markdown",
+          reply_markup: { inline_keyboard },
+        });
+        matchReportMessages.set(adminTelegramId, { chatId: sent.chat.id, messageId: sent.message_id });
+      } catch (e2: any) {
+        console.error("[bot] Failed to send fresh match report:", e2.message);
+      }
+    } else {
+      console.error("[bot] Failed to update match report:", err.message);
+    }
   }
 }
 
@@ -374,59 +438,72 @@ export function initBot(): void {
         ).catch(() => {});
       }
 
+    } else if (data.startsWith("match_action:")) {
+      // Format: match_action:<category>:<day>:<hour>
+      // Shows a two-button sub-reply: Notify hosts | Dismiss
+      const [, category, dayStr, hourStr] = data.split(":");
+      const day  = parseInt(dayStr);
+      const hour = parseInt(hourStr);
+      const dayName = DAYS[day] ?? `Day ${day}`;
+      const icon = CATEGORY_ICONS[category] ?? "📌";
+
+      await bot!.answerCallbackQuery(query.id, {
+        text: `${getCategoryLabel(category)} ${dayName} ${fmtHour(hour)}`,
+      });
+
+      await bot!.sendMessage(adminTelegramId!, 
+        `${icon} *${getCategoryLabel(category)}* — ${dayName} at ${fmtHour(hour)}\n\nWhat would you like to do?`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "📣 Notify hosts", callback_data: `notify_hosts:${category}:${day}:${hour}` },
+              { text: "✖ Dismiss",       callback_data: `dismiss_match:${category}:${day}:${hour}` },
+            ]],
+          },
+        }
+      ).catch(() => {});
+
     } else if (data.startsWith("notify_hosts:")) {
-      // Format: notify_hosts:<category>:<day>:<hour>
       const [, category, dayStr, hourStr] = data.split(":");
       const day  = parseInt(dayStr);
       const hour = parseInt(hourStr);
 
       await bot!.answerCallbackQuery(query.id, { text: "Notifying hosts…" });
 
-      // Find host/admin users with this interest and Telegram connected
       const organisers = await db
         .select({ id: users.id, telegramId: users.telegramId })
         .from(users)
-        .where(
-          and(
-            isNotNull(users.telegramId),
-            inArray(users.role, ["host", "admin"]),
-            sql`${category} = ANY(${users.interests})`
-          )
-        );
+        .where(and(
+          isNotNull(users.telegramId),
+          inArray(users.role, ["host", "admin"]),
+          sql`${category} = ANY(${users.interests})`
+        ));
 
       const dayName = DAYS[day] ?? `Day ${day}`;
-      const hourFmt = fmtHour(hour);
       const icon = CATEGORY_ICONS[category] ?? "📌";
-
       const demandMessage =
         `${icon} *Demand signal for ${getCategoryLabel(category)}*\n\n` +
-        `Expats are looking for *${getCategoryLabel(category)}* events on *${dayName} at ${hourFmt}*.\n\n` +
+        `Expats are looking for *${getCategoryLabel(category)}* events on *${dayName} at ${fmtHour(hour)}*.\n\n` +
         `Consider hosting an event at this time!\n` +
         `[Create an event](https://expatevents.org/create-event)`;
 
       let notified = 0;
       for (const org of organisers) {
-        if (org.telegramId) {
-          const ok = await sendToUser(org.telegramId, demandMessage);
-          if (ok) notified++;
-        }
+        if (org.telegramId) { const ok = await sendToUser(org.telegramId, demandMessage); if (ok) notified++; }
       }
 
-      // Mark match as notified in DB
-      await db
-        .update(availabilityMatches)
-        .set({ notified: true })
-        .where(
-          and(
-            eq(availabilityMatches.category, category),
-            eq(availabilityMatches.day, day),
-            eq(availabilityMatches.hour, hour)
-          )
-        );
+      await db.update(availabilityMatches).set({ notified: true })
+        .where(and(
+          eq(availabilityMatches.category, category),
+          eq(availabilityMatches.day, day),
+          eq(availabilityMatches.hour, hour)
+        ));
 
+      // Edit the sub-message to show result
       if (chatId && messageId) {
         await bot!.editMessageText(
-          originalText + `\n\n📣 *Sent* — notified ${notified} host${notified !== 1 ? "s" : ""}`,
+          `${CATEGORY_ICONS[category] ?? "📌"} *${getCategoryLabel(category)}* ${dayName} ${fmtHour(hour)}\n\n📣 *Sent* — notified ${notified} host${notified !== 1 ? "s" : ""}`,
           { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
         ).catch(() => {});
       }
@@ -436,29 +513,20 @@ export function initBot(): void {
       const day  = parseInt(dayStr);
       const hour = parseInt(hourStr);
 
-      pendingApprovals.delete(data); // no-op but harmless
-
       await bot!.answerCallbackQuery(query.id, { text: "Dismissed." });
 
-      // Mark as notified so it won't re-alert on next matcher run
-      await db
-        .update(availabilityMatches)
-        .set({ notified: true })
-        .where(
-          and(
-            eq(availabilityMatches.category, category),
-            eq(availabilityMatches.day, day),
-            eq(availabilityMatches.hour, hour)
-          )
-        );
+      await db.update(availabilityMatches).set({ notified: true })
+        .where(and(
+          eq(availabilityMatches.category, category),
+          eq(availabilityMatches.day, day),
+          eq(availabilityMatches.hour, hour)
+        ));
 
+      // Delete the sub-message entirely instead of leaving a "dismissed" stub
       if (chatId && messageId) {
-        await bot!.editMessageText(
-          originalText + "\n\n✖ _Dismissed_",
-          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
-        ).catch(() => {});
+        await bot!.deleteMessage(chatId, messageId).catch(() => {});
       }
-    }
+    }    }
   });
 
   // /start
@@ -624,9 +692,9 @@ export function initBot(): void {
 
     if (matches.length === 0) {
       await bot!.sendMessage(msg.chat.id,
-        `No availability matches found yet.
+        "No availability matches found yet.
 
-Users need to set their interests and availability slots at expatevents.org/profile.`,
+Users need to set their interests and availability slots at expatevents.org/profile.",
         { parse_mode: "Markdown" }
       );
       return;
@@ -671,7 +739,8 @@ ${matches.length} active match${matches.length !== 1 ? "es" : ""} across ${sorte
         text += `  _…and ${rows.length - 3} more slots_
 `;
       }
-      text += "\n";
+      text += "
+";
     }
 
     text += `_Use /matches <category> for details_
@@ -712,7 +781,8 @@ _Use /approve\_match <category> <day> <hour> to notify hosts_`;
 
       const list = categories
         .map(c => `${CATEGORY_ICONS[c] ?? "📌"} /matches\_${c}`)
-        .join("\n");
+        .join("
+");
 
       await bot!.sendMessage(msg.chat.id,
         `*Categories with availability matches:*
@@ -762,7 +832,8 @@ Try /matches to see available categories.`,
         text += `  ${fmtHour(slot.hour)}  ${bar} ${slot.userIds.length} users${notifiedMark}
 `;
       }
-      text += "\n";
+      text += "
+";
     }
 
     text += `_/approve\_match ${category} <day 0-6> <hour> to notify hosts_`;
