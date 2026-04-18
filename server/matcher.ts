@@ -10,7 +10,7 @@
 import { db } from "./db";
 import { users, availabilitySlots, availabilityMatches } from "@shared/schema";
 import { eq, and, isNotNull, sql, inArray } from "drizzle-orm";
-import { notifyAdminAvailabilityMatch } from "./bot";
+import { notifyAdminAvailabilityMatch, sendMatchReport } from "./bot";
 
 // ── Threshold ─────────────────────────────────────────────────────────────
 // Notify admin when 2 or more users share the same interest + day + hour.
@@ -48,15 +48,16 @@ export async function runAvailabilityMatcher(): Promise<void> {
         appScope: "expat",
         notified: false,
       }).onConflictDoNothing();
-
-      await notifyAdminAvailabilityMatch({
-        category:  match.category,
-        day:       match.day,
-        hour:      match.hour,
-        userCount: match.userIds.length,
-        userIds:   match.userIds,
-      });
     }
+
+    // Send ONE batched report to admin instead of one message per match
+    await sendMatchReport(matches.map(m => ({
+      category:  m.category,
+      day:       m.day,
+      hour:      m.hour,
+      userCount: m.userIds.length,
+      userIds:   m.userIds,
+    })));
 
     console.log(`[matcher] Done — ${matches.length} matches processed`);
   } catch (err) {
@@ -89,6 +90,8 @@ export async function runIncrementalMatcher(userId: number): Promise<void> {
 
     // For each of this user's (interest, day, hour) combinations,
     // count how many OTHER users share the same combination.
+    const changedMatches: { category: string; day: number; hour: number; userCount: number; userIds: number[] }[] = [];
+
     for (const interest of updatedUser.interests) {
       for (const slot of userSlots) {
         // Find other users who have this interest AND this slot
@@ -123,7 +126,6 @@ export async function runIncrementalMatcher(userId: number): Promise<void> {
           );
 
         if (existing) {
-          // Match already known — update userIds if this user is new to it
           const existingMatch = await db
             .select()
             .from(availabilityMatches)
@@ -136,18 +138,9 @@ export async function runIncrementalMatcher(userId: number): Promise<void> {
               .update(availabilityMatches)
               .set({ userIds: updatedIds, notified: false })
               .where(eq(availabilityMatches.id, existing.id));
-
-            // Notify admin of the updated count
-            await notifyAdminAvailabilityMatch({
-              category:  interest,
-              day:       slot.day,
-              hour:      slot.hour,
-              userCount: updatedIds.length,
-              userIds:   updatedIds,
-            });
+            changedMatches.push({ category: interest, day: slot.day, hour: slot.hour, userCount: updatedIds.length, userIds: updatedIds });
           }
         } else {
-          // Brand new match — insert and notify admin
           await db.insert(availabilityMatches).values({
             day:      slot.day,
             hour:     slot.hour,
@@ -156,19 +149,25 @@ export async function runIncrementalMatcher(userId: number): Promise<void> {
             appScope: "expat",
             notified: false,
           });
-
-          await notifyAdminAvailabilityMatch({
-            category:  interest,
-            day:       slot.day,
-            hour:      slot.hour,
-            userCount: allUserIds.length,
-            userIds:   allUserIds,
-          });
+          changedMatches.push({ category: interest, day: slot.day, hour: slot.hour, userCount: allUserIds.length, userIds: allUserIds });
         }
       }
     }
 
-    console.log(`[matcher] Incremental run complete for user ${userId}`);
+    // Send ONE updated report if anything changed
+    if (changedMatches.length > 0) {
+      // Fetch all current matches to build a complete report
+      const allMatches = await db.select().from(availabilityMatches);
+      await sendMatchReport(allMatches.map(m => ({
+        category:  m.category,
+        day:       m.day,
+        hour:      m.hour,
+        userCount: m.userIds.length,
+        userIds:   m.userIds,
+      })));
+    }
+
+    console.log(`[matcher] Incremental run complete for user ${userId} (${changedMatches.length} changes)`);
   } catch (err) {
     console.error(`[matcher] Incremental error for user ${userId}:`, err);
   }
