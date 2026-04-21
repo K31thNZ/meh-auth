@@ -201,6 +201,60 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
+// Accept initData from Telegram.WebApp.initData, verifies signature,
+// and logs the user in (or creates account if first time).
+app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
+  try {
+    const { initData } = req.body;
+    if (!initData) {
+      return res.status(400).json({ error: "Missing initData" });
+    }
+
+    // Parse the initData query string
+    const params = new URLSearchParams(initData);
+    const data: Record<string, string> = {};
+    for (const [key, value] of params.entries()) {
+      data[key] = value;
+    }
+
+    // Verify signature using the bot token
+    if (!verifyTelegramLogin(data, process.env.TELEGRAM_BOT_TOKEN ?? "")) {
+      return res.status(401).json({ error: "Invalid Telegram initData" });
+    }
+
+    // Extract user object (it's a JSON string in the 'user' field)
+    const userStr = data.user;
+    if (!userStr) {
+      return res.status(400).json({ error: "No user data in initData" });
+    }
+
+    const tgUser = JSON.parse(userStr);
+    const telegramId = String(tgUser.id);
+
+    // Find existing user or create a new one
+    let user = await storage.getUserByTelegramId(telegramId);
+    if (!user) {
+      // Generate a unique username based on Telegram info
+      const baseUsername = tgUser.username ?? `tg_${telegramId}`;
+      user = await storage.createUser({
+        username:    await uniqueUsername(baseUsername),
+        password:    null,
+        telegramId,
+        displayName: [tgUser.first_name, tgUser.last_name].filter(Boolean).join(" ") || null,
+        avatarUrl:   tgUser.photo_url ?? null,
+      });
+    }
+
+    // Establish session
+    req.login(user, (err) => {
+      if (err) return next(err);
+      res.json(sanitize(user));
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+  
   // ── User preferences ──────────────────────────────────────────────────────
 
   // PATCH /api/user/interests
