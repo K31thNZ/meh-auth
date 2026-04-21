@@ -1,6 +1,6 @@
 # meh-auth
 
-Centralized authentication service for the MEH (Moscow Expat Hub) platform. Used by ExpatEvents and Games in English.
+Centralized authentication service for the MEH (Moscow Expat Hub) platform. Used by ExpatEvents.org.
 
 ## Architecture
 
