@@ -1,6 +1,6 @@
 // server/auth.ts
-// All authentication strategies for the MEH platform.
-// Google, Yandex, Telegram, local username/password.
+// All authentication strategies for ExpatEvents.org.
+// Google, Yandex, magic code, local username/password.
 // Apple and Passkey are stubbed — uncomment when credentials are ready.
 
 import passport from "passport";
