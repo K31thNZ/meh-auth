@@ -4,6 +4,7 @@ import { registerMagicCodeRoutes } from "./magic-code";
 import { initBot } from "./bot";
 import { scheduleMatcher } from "./matcher";
 import { registerNotifyRoutes } from "./notify-routes";
+import matchProfileRouter from "./routes/match-profile";
 import express from "express";
 import cors from "cors";
 import session from "express-session";
@@ -568,6 +569,7 @@ document.addEventListener("keydown", e => {
 registerMagicCodeRoutes(app);
 registerNotifyRoutes(app);
 registerTelegramLinkRoutes(app);
+app.use("/api/user", matchProfileRouter);
 
 // ── GET /api/admin/users ───────────────────────────────────────────────────
 const VALID_ROLES = ["free", "premium", "host", "curator", "admin"];
