@@ -1,9 +1,21 @@
 // shared/schema.ts
 import { sql } from "drizzle-orm";
 import {
-  pgTable, serial, integer, text, boolean, timestamp,
+  pgTable, serial, integer, text, boolean, timestamp, jsonb,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
+
+// ── Types shared with the frontend ───────────────────────────────────────────
+// Keep these in sync with Profile.tsx
+
+export type ProficiencyLevel = "A1" | "A2" | "B1" | "B2" | "C1" | "C2";
+
+export interface LanguageEntry {
+  code:        string;           // ISO 639-1 e.g. "en"
+  proficiency: ProficiencyLevel;
+}
+
+// ── Tables ────────────────────────────────────────────────────────────────────
 
 export const users = pgTable("users", {
   id:          serial("id").primaryKey(),
@@ -22,6 +34,14 @@ export const users = pgTable("users", {
   isGamesMember:  boolean("is_games_member").notNull().default(false),
   dice:        integer("dice").notNull().default(0),
   createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
+
+  // ── Phase 1: Smart Match profile ─────────────────────────────────────────
+  // ISO 639-1 code for the user's native language (e.g. "en", "ru")
+  nativeLanguage:    text("native_language"),
+  // Array of { code, proficiency } objects — stored as JSONB
+  learningLanguages: jsonb("learning_languages").$type<LanguageEntry[]>().notNull().default(sql`'[]'::jsonb`),
+  // Name of the closest Moscow metro station chosen by the user
+  metroStation:      text("metro_station"),
 });
 
 export const telegramLinkTokens = pgTable("telegram_link_tokens", {
@@ -97,7 +117,8 @@ export const hostApplications = pgTable("host_applications", {
   createdAt:    timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
-// Relations (unchanged)
+// ── Relations (unchanged) ─────────────────────────────────────────────────────
+
 export const usersRelations = relations(users, ({ many }) => ({
   availabilitySlots:   many(availabilitySlots),
   notifications:       many(notifications),
@@ -115,7 +136,7 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 
 export const hostsRelations = relations(hosts, ({ one }) => ({
   ownerUser: one(users, { fields: [hosts.ownerUserId], references: [users.id] }),
-  approver:  one(users, { fields: [hosts.approvedBy], references: [users.id] }),
+  approver:  one(users, { fields: [hosts.approvedBy],  references: [users.id] }),
 }));
 
 export const hostApplicationsRelations = relations(hostApplications, ({ one }) => ({
@@ -126,9 +147,11 @@ export const telegramLinkTokensRelations = relations(telegramLinkTokens, ({ one 
   user: one(users, { fields: [telegramLinkTokens.userId], references: [users.id] }),
 }));
 
-export type User = typeof users.$inferSelect;
-export type AvailabilitySlot = typeof availabilitySlots.$inferSelect;
-export type Notification = typeof notifications.$inferSelect;
-export type Host = typeof hosts.$inferSelect;
-export type HostApplication = typeof hostApplications.$inferSelect;
+// ── Inferred types ────────────────────────────────────────────────────────────
+
+export type User              = typeof users.$inferSelect;
+export type AvailabilitySlot  = typeof availabilitySlots.$inferSelect;
+export type Notification      = typeof notifications.$inferSelect;
+export type Host              = typeof hosts.$inferSelect;
+export type HostApplication   = typeof hostApplications.$inferSelect;
 export type TelegramLinkToken = typeof telegramLinkTokens.$inferSelect;
