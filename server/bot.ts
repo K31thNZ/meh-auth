@@ -31,6 +31,11 @@ function fmtHour(h: number): string {
   return `${String(h).padStart(2, "0")}:00`;
 }
 
+// ── Helper: convert UTC date to Moscow time (UTC+3) ──────────────────────
+function toMoscowTime(utcDate: Date): Date {
+  return new Date(utcDate.getTime() + 3 * 60 * 60 * 1000);
+}
+
 let bot: TelegramBot | null = null;
 
 export function getBot(): TelegramBot | null {
@@ -38,8 +43,6 @@ export function getBot(): TelegramBot | null {
 }
 
 // ── Pending approval store ────────────────────────────────────────────────
-// Keyed by a short random token embedded in callback_data.
-// Entries expire after 24 hours so the Map never grows unboundedly.
 interface PendingEvent {
   event: {
     id: number;
@@ -88,7 +91,10 @@ async function dispatchEventNotifications(
     .where(sql`${event.category} = ANY(${users.interests})`);
 
   const icon = CATEGORY_ICONS[event.category] ?? "📌";
-  const dateStr = new Date(event.date).toLocaleDateString("en-GB", {
+
+  // Convert to Moscow time for display
+  const moscowDate = toMoscowTime(new Date(event.date));
+  const dateStr = moscowDate.toLocaleDateString("en-GB", {
     weekday: "short", day: "numeric", month: "short",
     hour: "2-digit", minute: "2-digit",
   });
@@ -127,8 +133,6 @@ async function dispatchEventNotifications(
 }
 
 // ── notifyMatchingUsers — sends admin approval prompt first ───────────────
-// Called by notify-routes.ts when expatevents publishes a new event.
-// Returns { sent: 0, inApp: 0 } immediately — actual sends happen after approval.
 export async function notifyMatchingUsers(event: {
   id: number;
   title: string;
@@ -140,13 +144,11 @@ export async function notifyMatchingUsers(event: {
 }): Promise<{ sent: number; inApp: number }> {
   const adminTelegramId = process.env.ADMIN_TELEGRAM_ID;
 
-  // No admin configured → dispatch immediately without approval step
   if (!adminTelegramId || !bot) {
     console.warn("[bot] ADMIN_TELEGRAM_ID not set — dispatching without approval");
     return dispatchEventNotifications(event);
   }
 
-  // Count how many users would be notified
   const [allMatches, telegramMatches] = await Promise.all([
     db.select({ id: users.id }).from(users)
       .where(sql`${event.category} = ANY(${users.interests})`),
@@ -162,7 +164,10 @@ export async function notifyMatchingUsers(event: {
   });
 
   const icon = CATEGORY_ICONS[event.category] ?? "📌";
-  const dateStr = new Date(event.date).toLocaleDateString("en-GB", {
+
+  // Convert to Moscow time for admin approval message
+  const moscowDate = toMoscowTime(new Date(event.date));
+  const dateStr = moscowDate.toLocaleDateString("en-GB", {
     weekday: "short", day: "numeric", month: "short",
     hour: "2-digit", minute: "2-digit",
   });
@@ -189,7 +194,6 @@ export async function notifyMatchingUsers(event: {
     });
     console.log(`[bot] Event ${event.id} awaiting admin approval (token: ${token})`);
   } catch (err: any) {
-    // Can't reach admin — fall back to immediate dispatch
     console.error("[bot] Failed to message admin, dispatching immediately:", err.message);
     pendingApprovals.delete(token);
     return dispatchEventNotifications(event);
@@ -199,17 +203,10 @@ export async function notifyMatchingUsers(event: {
 }
 
 // ── Match report ──────────────────────────────────────────────────────────
-// Called by matcher.ts ONCE with all current matches, not once per match.
-// Sends a single summary message to admin (or edits the previous one in place).
-// Each row has its own Notify / Dismiss button pair.
-//
-// Old signature notifyAdminAvailabilityMatch() is kept as a no-op for
-// any code that still calls it — the real work is done by sendMatchReport().
 export async function notifyAdminAvailabilityMatch(_match: {
   category: string; day: number; hour: number; userCount: number; userIds: number[];
 }): Promise<void> {
   // Individual-match notifications are suppressed.
-  // The full report is sent by sendMatchReport() from matcher.ts.
 }
 
 export async function sendMatchReport(matches: {
@@ -223,8 +220,6 @@ export async function sendMatchReport(matches: {
   if (!adminTelegramId || !bot) return;
   if (matches.length === 0) return;
 
-  // Build the report text
-  // Group by category, sorted by peak user count desc
   const byCat: Record<string, typeof matches> = {};
   for (const m of matches) {
     if (!byCat[m.category]) byCat[m.category] = [];
@@ -233,9 +228,13 @@ export async function sendMatchReport(matches: {
   const sortedCats = Object.entries(byCat)
     .sort((a, b) => Math.max(...b[1].map(m => m.userCount)) - Math.max(...a[1].map(m => m.userCount)));
 
+  // Use current Moscow time for report header
+  const nowMoscow = toMoscowTime(new Date());
+  const nowStr = nowMoscow.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
   let text = `📊 *Availability Report* — ${matches.length} match${matches.length !== 1 ? "es" : ""}
 `;
-  text += `_${new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}_
+  text += `_${nowStr}_
 
 `;
 
@@ -255,7 +254,6 @@ export async function sendMatchReport(matches: {
   }
   text += "_Tap a row below to notify hosts or dismiss_";
 
-  // Build one button row per top match (max 10 to avoid Telegram limits)
   const topMatches = [...matches].sort((a, b) => b.userCount - a.userCount).slice(0, 10);
   const inline_keyboard = topMatches.map(m => [{
     text: `${CATEGORY_ICONS[m.category] ?? "📌"} ${getCategoryLabel(m.category)} ${DAYS[m.day]} ${fmtHour(m.hour)} (${m.userCount})`,
@@ -266,7 +264,6 @@ export async function sendMatchReport(matches: {
 
   try {
     if (existing) {
-      // Edit the previous report message in place
       await bot.editMessageText(text, {
         chat_id:    existing.chatId,
         message_id: existing.messageId,
@@ -274,7 +271,6 @@ export async function sendMatchReport(matches: {
         reply_markup: { inline_keyboard },
       });
     } else {
-      // First time — send a new message and store its ID
       const sent = await bot.sendMessage(adminTelegramId, text, {
         parse_mode:   "Markdown",
         reply_markup: { inline_keyboard },
@@ -286,7 +282,6 @@ export async function sendMatchReport(matches: {
     }
     console.log(`[bot] Match report sent/updated (${matches.length} matches)`);
   } catch (err: any) {
-    // If the message was deleted by admin, clear stored ID and try fresh
     if (err?.message?.includes("message to edit not found") || err?.message?.includes("MESSAGE_ID_INVALID")) {
       matchReportMessages.delete(adminTelegramId);
       try {
@@ -314,9 +309,8 @@ export async function notifyOrganiserDemand(organiserId: number, match: {
   const [organiser] = await db.select().from(users).where(eq(users.id, organiserId));
   if (!organiser?.telegramId || !bot) return;
 
-  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const dayName = days[match.day] ?? `Day ${match.day}`;
-  const hourStr = `${String(match.hour).padStart(2, "0")}:00`;
+  const dayName = DAYS[match.day] ?? `Day ${match.day}`;
+  const hourStr = fmtHour(match.hour);
   const icon = CATEGORY_ICONS[match.category] ?? "📌";
 
   const message =
@@ -349,7 +343,6 @@ export async function broadcastMessage(message: string): Promise<{ sent: number;
   return { sent, failed };
 }
 
-// Store for match report message IDs (to enable editing)
 const matchReportMessages = new Map<string, { chatId: number; messageId: number }>();
 
 // ── Init bot ──────────────────────────────────────────────────────────────
@@ -372,7 +365,7 @@ export function initBot(): void {
     }
   });
 
-  // ── Inline keyboard: Approve / Decline event notification ────────────────
+  // ── Callback handling ──────────────────────────────────────────────────
   bot.on("callback_query", async (query) => {
     const adminTelegramId = process.env.ADMIN_TELEGRAM_ID;
     const callerId = String(query.from.id);
@@ -392,16 +385,9 @@ export function initBot(): void {
       const pending = pendingApprovals.get(token);
 
       if (!pending) {
-        await bot!.answerCallbackQuery(query.id, {
-          text: "⚠️ This approval has expired (>24h).",
-          show_alert: true,
-        });
-        // Remove buttons so they can't be clicked again
+        await bot!.answerCallbackQuery(query.id, { text: "⚠️ This approval has expired (>24h).", show_alert: true });
         if (chatId && messageId) {
-          await bot!.editMessageReplyMarkup(
-            { inline_keyboard: [] },
-            { chat_id: chatId, message_id: messageId }
-          ).catch(() => {});
+          await bot!.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId }).catch(() => {});
         }
         return;
       }
@@ -409,22 +395,14 @@ export function initBot(): void {
       pendingApprovals.delete(token);
       await bot!.answerCallbackQuery(query.id, { text: "Sending notifications…" });
 
-      // Show sending state while we work
       if (chatId && messageId) {
-        await bot!.editMessageText(
-          originalText + "\n\n⏳ _Sending…_",
-          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
-        ).catch(() => {});
+        await bot!.editMessageText(originalText + "\n\n⏳ _Sending…_", { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }).catch(() => {});
       }
 
       const { sent, inApp } = await dispatchEventNotifications(pending.event);
 
-      // Update message with final result
       if (chatId && messageId) {
-        await bot!.editMessageText(
-          originalText + `\n\n✅ *Approved & sent* — ${sent} Telegram, ${inApp} in-app`,
-          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
-        ).catch(() => {});
+        await bot!.editMessageText(originalText + `\n\n✅ *Approved & sent* — ${sent} Telegram, ${inApp} in-app`, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }).catch(() => {});
       }
 
     } else if (data.startsWith("decline_event:")) {
@@ -434,26 +412,19 @@ export function initBot(): void {
       await bot!.answerCallbackQuery(query.id, { text: "Declined." });
 
       if (chatId && messageId) {
-        await bot!.editMessageText(
-          originalText + "\n\n❌ *Declined* — no notifications sent.",
-          { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
-        ).catch(() => {});
+        await bot!.editMessageText(originalText + "\n\n❌ *Declined* — no notifications sent.", { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }).catch(() => {});
       }
 
     } else if (data.startsWith("match_action:")) {
-      // Format: match_action:<category>:<day>:<hour>
-      // Shows a two-button sub-reply: Notify hosts | Dismiss
       const [, category, dayStr, hourStr] = data.split(":");
       const day  = parseInt(dayStr);
       const hour = parseInt(hourStr);
       const dayName = DAYS[day] ?? `Day ${day}`;
       const icon = CATEGORY_ICONS[category] ?? "📌";
 
-      await bot!.answerCallbackQuery(query.id, {
-        text: `${getCategoryLabel(category)} ${dayName} ${fmtHour(hour)}`,
-      });
+      await bot!.answerCallbackQuery(query.id, { text: `${getCategoryLabel(category)} ${dayName} ${fmtHour(hour)}` });
 
-      await bot!.sendMessage(adminTelegramId!, 
+      await bot!.sendMessage(adminTelegramId!,
         `${icon} *${getCategoryLabel(category)}* — ${dayName} at ${fmtHour(hour)}\n\nWhat would you like to do?`,
         {
           parse_mode: "Markdown",
@@ -502,7 +473,6 @@ export function initBot(): void {
           eq(availabilityMatches.hour, hour)
         ));
 
-      // Edit the sub-message to show result
       if (chatId && messageId) {
         await bot!.editMessageText(
           `${CATEGORY_ICONS[category] ?? "📌"} *${getCategoryLabel(category)}* ${dayName} ${fmtHour(hour)}\n\n📣 *Sent* — notified ${notified} host${notified !== 1 ? "s" : ""}`,
@@ -524,7 +494,6 @@ export function initBot(): void {
           eq(availabilityMatches.hour, hour)
         ));
 
-      // Delete the sub-message entirely instead of leaving a "dismissed" stub
       if (chatId && messageId) {
         await bot!.deleteMessage(chatId, messageId).catch(() => {});
       }
@@ -644,10 +613,8 @@ export function initBot(): void {
       return;
     }
 
-    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    const dayName = days[day] ?? `Day ${day}`;
-    const hourStr = `${String(hour).padStart(2, "0")}:00`;
-
+    const dayName = DAYS[day] ?? `Day ${day}`;
+    const hourStr = fmtHour(hour);
     const demandMessage =
       `${CATEGORY_ICONS[category] ?? "📌"} *Demand signal for ${getCategoryLabel(category)}*\n\n` +
       `We've detected expats interested in *${getCategoryLabel(category)}* who are free on *${dayName} at ${hourStr}*.\n\n` +
@@ -669,9 +636,6 @@ export function initBot(): void {
   });
 
   // ── /summary (admin) ─────────────────────────────────────────────────────
-  // Shows a full breakdown of all current availability matches grouped by
-  // category, sorted by user count descending. Re-runs the matcher first so
-  // the data is always fresh when the admin asks for it.
   bot.onText(/\/summary/, async (msg) => {
     const telegramId = String(msg.from?.id ?? msg.chat.id);
     if (telegramId !== process.env.ADMIN_TELEGRAM_ID) {
@@ -700,14 +664,12 @@ export function initBot(): void {
       return;
     }
 
-    // Group by category
     const byCategory: Record<string, typeof matches> = {};
     for (const m of matches) {
       if (!byCategory[m.category]) byCategory[m.category] = [];
       byCategory[m.category].push(m);
     }
 
-    // Sort categories by total user coverage (sum of userIds across slots)
     const sortedCategories = Object.entries(byCategory)
       .map(([cat, rows]) => ({
         cat,
@@ -720,7 +682,6 @@ export function initBot(): void {
 
     for (const { cat, rows } of sortedCategories) {
       const icon = CATEGORY_ICONS[cat] ?? "📌";
-      // Sort slots by user count desc, show top 3
       const topSlots = [...rows]
         .sort((a, b) => b.userIds.length - a.userIds.length)
         .slice(0, 3);
@@ -738,7 +699,6 @@ export function initBot(): void {
 
     text += `_Use /matches <category> for details_\n_Use /approve\\_match <category> <day> <hour> to notify hosts_`;
 
-    // Telegram messages max 4096 chars — split if needed
     if (text.length <= 4096) {
       await bot!.sendMessage(msg.chat.id, text, { parse_mode: "Markdown" });
     } else {
@@ -750,8 +710,6 @@ export function initBot(): void {
   });
 
   // ── /matches [category] (admin) ───────────────────────────────────────────
-  // Drill into a specific category and see every slot with user count.
-  // If no category given, lists available categories.
   bot.onText(/\/matches(?:\s+(\w+))?/, async (msg, match) => {
     const telegramId = String(msg.from?.id ?? msg.chat.id);
     if (telegramId !== process.env.ADMIN_TELEGRAM_ID) {
@@ -762,7 +720,6 @@ export function initBot(): void {
     const category = match?.[1]?.toLowerCase().trim();
 
     if (!category) {
-      // List all categories that have matches
       const allMatches = await db.select({ category: availabilityMatches.category }).from(availabilityMatches);
       const categories = [...new Set(allMatches.map(m => m.category))].sort();
 
@@ -799,14 +756,13 @@ export function initBot(): void {
     const icon = CATEGORY_ICONS[category] ?? "📌";
     let text = `${icon} *${getCategoryLabel(category)} — all slots*\n\n`;
 
-    // Group by day
     const byDay: Record<number, typeof rows> = {};
     for (const row of rows) {
       if (!byDay[row.day]) byDay[row.day] = [];
       byDay[row.day].push(row);
     }
 
-    for (const day of [1, 2, 3, 4, 5, 6, 0]) { // Mon–Sun order
+    for (const day of [1, 2, 3, 4, 5, 6, 0]) {
       if (!byDay[day]) continue;
       text += `*${DAYS[day]}*\n`;
       const sorted = byDay[day].sort((a, b) => a.hour - b.hour);
@@ -824,7 +780,6 @@ export function initBot(): void {
   });
 
   // ── /runmatcher (admin) ───────────────────────────────────────────────────
-  // Manually re-run the matcher and report how many matches were found.
   bot.onText(/\/runmatcher/, async (msg) => {
     const telegramId = String(msg.from?.id ?? msg.chat.id);
     if (telegramId !== process.env.ADMIN_TELEGRAM_ID) {
