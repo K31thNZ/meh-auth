@@ -17,10 +17,38 @@
 
 import TelegramBot from "node-telegram-bot-api";
 import { db } from "./db";
-import { users, notifications, sparks as sparksTable } from "@shared/schema";
-import { eq, and, isNotNull, inArray, sql, gte, lte, or } from "drizzle-orm";
+import { users, notifications } from "@shared/schema";
+import { eq, and, isNotNull, sql } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
 import { handleTelegramStartToken } from "./telegram-link";
+
+// ── Internal expatevents API client ───────────────────────────────────────────
+// The sparks table lives in the expatevents app, not in meh-auth.
+// All spark reads/writes go through the expatevents internal API so we don't
+// need cross-service DB access.
+
+const EXPAT_API_URL    = (process.env.EXPAT_API_URL ?? "https://expatevents.org").replace(/\/$/, "");
+const EXPAT_API_SECRET = process.env.EXPAT_API_SECRET ?? "";
+
+async function expatApi<T = any>(
+  method: "GET" | "POST",
+  path: string,
+  body?: object
+): Promise<T> {
+  const res = await fetch(`${EXPAT_API_URL}${path}`, {
+    method,
+    headers: {
+      "Content-Type":  "application/json",
+      "X-Bot-Secret":  EXPAT_API_SECRET,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`expatApi ${method} ${path} → ${res.status}: ${text}`);
+  }
+  return res.json() as Promise<T>;
+}
 
 const CATEGORY_ICONS: Record<string, string> = {
   networking: "🔗", tech: "💻", culture: "🎨", food: "🍔",
@@ -263,19 +291,15 @@ async function handleSparksBrowse(chatId: string): Promise<void> {
     return;
   }
 
-  const now = new Date();
-
-  // Fetch active, non-expired sparks
-  const activeSparks = await db
-    .select()
-    .from(sparksTable)
-    .where(
-      and(
-        inArray(sparksTable.status, ["pending", "active"]),
-        gte(sparksTable.expiresAt, now),
-        gte(sparksTable.meetTime,  now)
-      )
-    );
+  // Fetch active, non-expired sparks from the expatevents API
+  let activeSparks: any[] = [];
+  try {
+    activeSparks = await expatApi<any[]>("GET", "/api/bot/sparks/active");
+  } catch (err: any) {
+    console.error("[bot] Failed to fetch sparks:", err.message);
+    await bot.sendMessage(chatId, "❌ Could not load sparks right now. Try again later.");
+    return;
+  }
 
   if (activeSparks.length === 0) {
     await bot.sendMessage(chatId,
@@ -519,27 +543,20 @@ async function submitSparkWizard(chatId: string): Promise<void> {
   }
 
   try {
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + (state.expiresInMins ?? 60) * 60_000);
-
-    // Derive a short title from the activity
     const label = SPARK_ACTIVITIES.find(a => a.value === state.activity)?.label ?? "Meetup";
     const icon  = SPARK_ACTIVITIES.find(a => a.value === state.activity)?.icon ?? "⚡";
 
-    const [inserted] = await db
-      .insert(sparksTable)
-      .values({
-        senderId:      String(user.id),
-        title:         `${icon} ${label}`,
-        description:   state.description ?? "",
-        activity:      state.activity ?? "social",
-        location:      state.location ?? "Moscow",
-        meetTime:      new Date(state.meetTime!),
-        expiresAt,
-        maxRespondents: state.maxRespondents ?? 5,
-        status:        "pending",
-      })
-      .returning();
+    // Create spark via expatevents API — it owns the sparks table
+    const inserted = await expatApi<any>("POST", "/api/bot/sparks", {
+      senderId:       String(user.id),
+      title:          `${icon} ${label}`,
+      description:    state.description ?? "",
+      activity:       state.activity ?? "social",
+      location:       state.location ?? "Moscow",
+      meetTime:       state.meetTime,         // ISO string
+      expiresInMins:  state.expiresInMins ?? 60,
+      maxRespondents: state.maxRespondents ?? 5,
+    });
 
     sparkWizards.delete(chatId);
 
@@ -550,21 +567,21 @@ async function submitSparkWizard(chatId: string): Promise<void> {
       { parse_mode: "Markdown" }
     );
 
-    // Notify matching users
+    // Notify matching users (bot-side push — expatevents also notifies in-app)
     await notifySparkToMatching({
-      id:            inserted.id,
-      title:         inserted.title,
-      description:   inserted.description ?? undefined,
-      activity:      inserted.activity,
-      location:      inserted.location,
-      meetTime:      inserted.meetTime,
-      expiresAt:     inserted.expiresAt,
+      id:             inserted.id,
+      title:          inserted.title,
+      description:    inserted.description ?? undefined,
+      activity:       inserted.activity,
+      location:       inserted.location,
+      meetTime:       inserted.meetTime,
+      expiresAt:      inserted.expiresAt,
       maxRespondents: inserted.maxRespondents,
-      senderId:      String(user.id),
+      senderId:       String(user.id),
     });
 
   } catch (err: any) {
-    console.error("[bot] Failed to insert spark:", err.message);
+    console.error("[bot] Failed to create spark:", err.message);
     await bot.sendMessage(chatId,
       "❌ Something went wrong creating your Spark. Please try again."
     );
@@ -590,60 +607,37 @@ async function handleSparkJoin(
     return;
   }
 
-  const [spark] = await db.select().from(sparksTable).where(eq(sparksTable.id, sparkId));
-  if (!spark) {
-    await bot.answerCallbackQuery(callbackQueryId, { text: "Spark not found.", show_alert: true });
-    return;
-  }
-  if (!["pending", "active"].includes(spark.status)) {
-    await bot.answerCallbackQuery(callbackQueryId, {
-      text: "This Spark is no longer open.",
-      show_alert: true,
-    });
-    return;
-  }
-  if (new Date(spark.expiresAt) < new Date()) {
-    await bot.answerCallbackQuery(callbackQueryId, {
-      text: "This Spark has expired.",
-      show_alert: true,
-    });
-    return;
-  }
-
-  // Insert or update a response row
-  // (Assumes a spark_responses table; adjust table/column names to match your schema)
   try {
-    await db.execute(
-      sql`
-        INSERT INTO spark_responses (spark_id, responder_id, status, created_at, updated_at)
-        VALUES (${sparkId}, ${String(user.id)}, 'accepted', NOW(), NOW())
-        ON CONFLICT (spark_id, responder_id)
-        DO UPDATE SET status = 'accepted', updated_at = NOW()
-      `
-    );
-
-    // Update spark status to 'active' once it has at least one accepted response
-    await db
-      .update(sparksTable)
-      .set({ status: "active" })
-      .where(and(eq(sparksTable.id, sparkId), eq(sparksTable.status, "pending")));
-
-    await bot.answerCallbackQuery(callbackQueryId, {
-      text: `⚡ You're in! See you at ${spark.location}.`,
+    // Delegate join to expatevents API — it validates status, expiry, capacity
+    const result = await expatApi<{
+      ok: boolean;
+      message?: string;
+      spark?: any;
+      creatorTelegramId?: string;
+    }>("POST", `/api/bot/sparks/${sparkId}/respond`, {
+      responderId: String(user.id),
+      status:      "accepted",
     });
 
-    // Notify the spark creator
-    const [creator] = await db
-      .select()
-      .from(users)
-      .where(sql`${users.id}::text = ${spark.senderId}`);
+    if (!result.ok) {
+      await bot.answerCallbackQuery(callbackQueryId, {
+        text: result.message ?? "This Spark is no longer available.",
+        show_alert: true,
+      });
+      return;
+    }
 
-    if (creator?.telegramId && creator.telegramId !== chatId) {
+    await bot.answerCallbackQuery(callbackQueryId, {
+      text: `⚡ You're in! See you at ${result.spark?.location ?? "the meetup"}.`,
+    });
+
+    // Notify the spark creator if they're a Telegram user
+    if (result.creatorTelegramId && result.creatorTelegramId !== chatId) {
       const displayName = user.displayName ?? user.username ?? "Someone";
       await sendToUser(
-        creator.telegramId,
+        result.creatorTelegramId,
         `⚡ *${displayName} joined your Spark!*\n\n` +
-        `"${spark.title}" at ${spark.location}\n` +
+        `"${result.spark?.title}" at ${result.spark?.location}\n` +
         `[Manage on ExpatEvents](https://expatevents.org/sparks)`
       );
     }
@@ -670,14 +664,10 @@ async function handleSparkPass(
   }
 
   try {
-    await db.execute(
-      sql`
-        INSERT INTO spark_responses (spark_id, responder_id, status, created_at, updated_at)
-        VALUES (${sparkId}, ${String(user.id)}, 'declined', NOW(), NOW())
-        ON CONFLICT (spark_id, responder_id)
-        DO UPDATE SET status = 'declined', updated_at = NOW()
-      `
-    );
+    await expatApi("POST", `/api/bot/sparks/${sparkId}/respond`, {
+      responderId: String(user.id),
+      status:      "declined",
+    });
     await bot.answerCallbackQuery(callbackQueryId, { text: "👋 Passed." });
   } catch (err: any) {
     console.error("[bot] spark_pass error:", err.message);
