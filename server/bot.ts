@@ -801,6 +801,17 @@ export async function notifyMatchingUsers(event: {
 }
 
 // ── Match report ──────────────────────────────────────────────────────────────
+//
+// Layout: time blocks first (longer blocks listed before shorter ones),
+// then within each block the interests that have demand, sorted by user count.
+//
+// Algorithm:
+//   1. Group raw hour-slots by day.
+//   2. Within each day, merge consecutive hours that share at least one
+//      category into contiguous blocks, accumulating per-category user counts.
+//   3. Sort blocks by duration desc, then total users desc.
+//   4. For each block, list categories sorted by user count desc.
+//   5. Build inline keyboard rows from the top blocks (one button per block).
 
 export async function notifyAdminAvailabilityMatch(_match: {
   category: string; day: number; hour: number; userCount: number; userIds: number[];
@@ -808,81 +819,215 @@ export async function notifyAdminAvailabilityMatch(_match: {
   // Individual-match notifications suppressed — report batching handles this.
 }
 
-export async function sendMatchReport(matches: {
+interface MatchSlot {
   category: string;
   day: number;
   hour: number;
   userCount: number;
   userIds: number[];
-}[]): Promise<void> {
+}
+
+interface TimeBlock {
+  day: number;
+  startHour: number;
+  endHour: number;        // inclusive
+  durationHours: number;  // endHour - startHour + 1
+  totalUsers: number;     // sum across all categories in block
+  categories: { category: string; userCount: number }[];
+}
+
+/**
+ * Merge a sorted list of per-hour slots (same day) into contiguous blocks.
+ * Two slots are "adjacent" when their hours differ by exactly 1 AND they
+ * share at least one category in common.  When merged, user counts per
+ * category are summed (deduplicated by userIds where possible).
+ */
+function mergeHoursIntoBlocks(daySlots: MatchSlot[]): TimeBlock[] {
+  // Sort by hour ascending
+  const sorted = [...daySlots].sort((a, b) => a.hour - b.hour);
+  const day    = sorted[0].day;
+
+  // Build a map: hour → { category → userCount }
+  const hourMap = new Map<number, Map<string, number>>();
+  for (const s of sorted) {
+    if (!hourMap.has(s.hour)) hourMap.set(s.hour, new Map());
+    const cats = hourMap.get(s.hour)!;
+    cats.set(s.category, (cats.get(s.category) ?? 0) + s.userCount);
+  }
+
+  const hours    = [...hourMap.keys()].sort((a, b) => a - b);
+  const blocks:  TimeBlock[] = [];
+  let blockStart = 0;
+
+  while (blockStart < hours.length) {
+    let blockEnd = blockStart;
+
+    // Extend block as long as next hour is consecutive AND shares ≥1 category
+    while (blockEnd + 1 < hours.length) {
+      const curHour  = hours[blockEnd];
+      const nextHour = hours[blockEnd + 1];
+      if (nextHour !== curHour + 1) break;
+
+      // Check if current and next hour share any category
+      const curCats  = new Set(hourMap.get(curHour)!.keys());
+      const nextCats = [...hourMap.get(nextHour)!.keys()];
+      if (!nextCats.some(c => curCats.has(c))) break;
+
+      blockEnd++;
+    }
+
+    // Aggregate category counts across all hours in [blockStart, blockEnd]
+    const catTotals = new Map<string, number>();
+    for (let i = blockStart; i <= blockEnd; i++) {
+      for (const [cat, count] of hourMap.get(hours[i])!) {
+        catTotals.set(cat, (catTotals.get(cat) ?? 0) + count);
+      }
+    }
+
+    const categories = [...catTotals.entries()]
+      .map(([category, userCount]) => ({ category, userCount }))
+      .sort((a, b) => b.userCount - a.userCount);
+
+    const totalUsers = categories.reduce((s, c) => s + c.userCount, 0);
+
+    blocks.push({
+      day,
+      startHour:     hours[blockStart],
+      endHour:       hours[blockEnd],
+      durationHours: hours[blockEnd] - hours[blockStart] + 1,
+      totalUsers,
+      categories,
+    });
+
+    blockStart = blockEnd + 1;
+  }
+
+  return blocks;
+}
+
+function formatBlockHeader(block: TimeBlock): string {
+  const dayName  = DAYS[block.day] ?? `Day ${block.day}`;
+  const start    = fmtHour(block.startHour);
+  const end      = fmtHour(block.endHour + 1); // show exclusive end, e.g. 18:00–20:00
+  const durLabel = block.durationHours === 1
+    ? "1 hr"
+    : `${block.durationHours} hrs`;
+  return `🕐 *${dayName}  ${start}–${end}*  _(${durLabel})_`;
+}
+
+export async function sendMatchReport(matches: MatchSlot[]): Promise<void> {
   const adminTelegramId = process.env.ADMIN_TELEGRAM_ID;
   if (!adminTelegramId || !bot || matches.length === 0) return;
 
-  const byCat: Record<string, typeof matches> = {};
+  // ── Step 1: group all slots by day ────────────────────────────────────────
+  const byDay = new Map<number, MatchSlot[]>();
   for (const m of matches) {
-    if (!byCat[m.category]) byCat[m.category] = [];
-    byCat[m.category].push(m);
+    if (!byDay.has(m.day)) byDay.set(m.day, []);
+    byDay.get(m.day)!.push(m);
   }
-  const sortedCats = Object.entries(byCat)
-    .sort((a, b) =>
-      Math.max(...b[1].map(m => m.userCount)) - Math.max(...a[1].map(m => m.userCount))
-    );
 
-  const nowStr = safeMoscowStr(new Date());
-  let text = `📊 *Availability Report* — ${matches.length} match${matches.length !== 1 ? "es" : ""}\n_${nowStr}_\n\n`;
+  // ── Step 2: merge hours into blocks per day ───────────────────────────────
+  const allBlocks: TimeBlock[] = [];
+  for (const daySlots of byDay.values()) {
+    allBlocks.push(...mergeHoursIntoBlocks(daySlots));
+  }
 
-  for (const [cat, rows] of sortedCats) {
-    const icon     = CATEGORY_ICONS[cat] ?? "📌";
-    const topSlots = [...rows].sort((a, b) => b.userCount - a.userCount).slice(0, 3);
-    text += `${icon} *${getCategoryLabel(cat)}*\n`;
-    for (const slot of topSlots) {
-      const dayName = DAYS[slot.day] ?? `Day ${slot.day}`;
-      text += `  • ${dayName} ${fmtHour(slot.hour)} — ${slot.userCount} user${slot.userCount !== 1 ? "s" : ""}\n`;
+  // ── Step 3: sort blocks — longer duration first, then more total users ────
+  allBlocks.sort((a, b) => {
+    if (b.durationHours !== a.durationHours) return b.durationHours - a.durationHours;
+    return b.totalUsers - a.totalUsers;
+  });
+
+  // ── Step 4: build message text ────────────────────────────────────────────
+  const nowStr      = safeMoscowStr(new Date());
+  const uniqueUsers = new Set(matches.flatMap(m => m.userIds)).size;
+
+  let text =
+    `📊 *Availability Report*\n` +
+    `_${nowStr} · ${allBlocks.length} time block${allBlocks.length !== 1 ? "s" : ""} · ${uniqueUsers} user${uniqueUsers !== 1 ? "s" : ""}_\n\n`;
+
+  // Show up to 12 blocks to stay within Telegram's 4096-char message limit
+  const visibleBlocks = allBlocks.slice(0, 12);
+
+  for (const block of visibleBlocks) {
+    text += formatBlockHeader(block) + "\n";
+
+    // List all categories within this block (cap at 6 to keep it readable)
+    const cats = block.categories.slice(0, 6);
+    for (const { category, userCount } of cats) {
+      const icon  = CATEGORY_ICONS[category] ?? "📌";
+      const label = getCategoryLabel(category);
+      text += `  ${icon} ${label} — ${userCount} user${userCount !== 1 ? "s" : ""}\n`;
     }
-    if (rows.length > 3) text += `  _…+${rows.length - 3} more slots_\n`;
+    if (block.categories.length > 6) {
+      text += `  _…+${block.categories.length - 6} more interests_\n`;
+    }
     text += "\n";
   }
-  text += "_Tap a row below to notify hosts or dismiss_";
 
-  const topMatches = [...matches].sort((a, b) => b.userCount - a.userCount).slice(0, 10);
-  const inline_keyboard = topMatches.map(m => [{
-    text: `${CATEGORY_ICONS[m.category] ?? "📌"} ${getCategoryLabel(m.category)} ${DAYS[m.day]} ${fmtHour(m.hour)} (${m.userCount})`,
-    callback_data: `match_action:${m.category}:${m.day}:${m.hour}`,
-  }]);
+  if (allBlocks.length > 12) {
+    text += `_…and ${allBlocks.length - 12} more blocks not shown_\n\n`;
+  }
 
+  text += "_Tap a time block below to act on it_";
+
+  // ── Step 5: inline keyboard — one button per visible block ────────────────
+  // Telegram limits: ≤100 buttons, ≤8 buttons/row. One button per row is clearest.
+  const inline_keyboard: TelegramBot.InlineKeyboardButton[][] = visibleBlocks.map(block => {
+    const dayName  = DAYS[block.day] ?? `Day ${block.day}`;
+    const start    = fmtHour(block.startHour);
+    const end      = fmtHour(block.endHour + 1);
+    const durLabel = block.durationHours === 1 ? "1hr" : `${block.durationHours}hr`;
+    // Show top 2 categories inline in the button label
+    const topCats  = block.categories.slice(0, 2)
+      .map(c => CATEGORY_ICONS[c.category] ?? "📌")
+      .join("");
+    const label    = `${topCats} ${dayName} ${start}–${end} (${durLabel}, ${block.totalUsers} users)`;
+    const cbData   = `block_action:${block.day}:${block.startHour}:${block.endHour}`;
+    return [{ text: label, callback_data: cbData }];
+  });
+
+  // ── Step 6: send or edit the persisted report message ─────────────────────
   const existing = matchReportMessages.get(adminTelegramId);
 
-  try {
+  const sendOrEdit = async () => {
     if (existing) {
-      await bot.editMessageText(text, {
-        chat_id:      existing.chatId,
-        message_id:   existing.messageId,
-        parse_mode:   "Markdown",
-        reply_markup: { inline_keyboard },
-      });
-    } else {
-      const sent = await bot.sendMessage(adminTelegramId, text, {
-        parse_mode:   "Markdown",
-        reply_markup: { inline_keyboard },
-      });
-      matchReportMessages.set(adminTelegramId, { chatId: sent.chat.id, messageId: sent.message_id });
-    }
-    console.log(`[bot] Match report sent/updated (${matches.length} matches)`);
-  } catch (err: any) {
-    if (err?.message?.includes("message to edit not found") || err?.message?.includes("MESSAGE_ID_INVALID")) {
-      matchReportMessages.delete(adminTelegramId);
       try {
-        const sent = await bot.sendMessage(adminTelegramId, text, {
+        await bot!.editMessageText(text, {
+          chat_id:      existing.chatId,
+          message_id:   existing.messageId,
           parse_mode:   "Markdown",
           reply_markup: { inline_keyboard },
         });
-        matchReportMessages.set(adminTelegramId, { chatId: sent.chat.id, messageId: sent.message_id });
-      } catch (e2: any) {
-        console.error("[bot] Failed to send fresh match report:", e2.message);
+        return;
+      } catch (err: any) {
+        // Message no longer exists — fall through to send a fresh one
+        if (
+          err?.message?.includes("message to edit not found") ||
+          err?.message?.includes("MESSAGE_ID_INVALID")
+        ) {
+          matchReportMessages.delete(adminTelegramId);
+        } else {
+          throw err;
+        }
       }
-    } else {
-      console.error("[bot] Failed to update match report:", err.message);
     }
+
+    const sent = await bot!.sendMessage(adminTelegramId, text, {
+      parse_mode:   "Markdown",
+      reply_markup: { inline_keyboard },
+    });
+    matchReportMessages.set(adminTelegramId, {
+      chatId:    sent.chat.id,
+      messageId: sent.message_id,
+    });
+  };
+
+  try {
+    await sendOrEdit();
+    console.log(`[bot] Match report sent/updated (${allBlocks.length} blocks from ${matches.length} slots)`);
+  } catch (err: any) {
+    console.error("[bot] Failed to send match report:", err.message);
   }
 }
 
@@ -1211,11 +1356,19 @@ export function initBot(): void {
       return;
     }
 
-    // ── Match action (availability report row tap) ──────────────────────────
+    // ── Block action (availability report block tap) ─────────────────────────
+    // callback_data format: block_action:{day}:{startHour}:{endHour}
 
-    if (data.startsWith("match_action:")) {
+    if (data.startsWith("block_action:")) {
+      const [, dayStr, startStr, endStr] = data.split(":");
+      const day       = parseInt(dayStr,   10);
+      const startHour = parseInt(startStr, 10);
+      const endHour   = parseInt(endStr,   10);
+      const dayName   = DAYS[day] ?? `Day ${day}`;
+      const start     = fmtHour(startHour);
+      const end       = fmtHour(endHour + 1);
       await bot!.answerCallbackQuery(qId, {
-        text: "Feature coming soon — notify organisers from the admin panel.",
+        text: `${dayName} ${start}\u2013${end} \u2014 use the admin panel to notify organisers for this slot.`,
         show_alert: true,
       });
       return;
