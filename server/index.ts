@@ -1,7 +1,7 @@
 // server/index.ts
 import { registerTelegramLinkRoutes } from "./telegram-link";
 import { registerMagicCodeRoutes } from "./magic-code";
-import { bot } from "./bot"; // grammy bot instance
+import { bot } from "./bot";               // grammy bot instance (auto-started)
 import { scheduleMatcher } from "./matcher";
 import { registerNotifyRoutes } from "./notify-routes";
 import matchProfileRouter from "./routes/match-profile";
@@ -330,4 +330,388 @@ app.get("/login", (req, res) => {
       letter-spacing: 0.08em;
     }
     .divider::before, .divider::after {
-      content:
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: #EDE9E5;
+    }
+    .oauth-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      padding: 12px 16px;
+      background: #FCFAF8;
+      border: 1.5px solid #E5E0DC;
+      border-radius: 9999px;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: "Plus Jakarta Sans", sans-serif;
+      color: #251D18;
+      cursor: pointer;
+      text-decoration: none;
+      margin-bottom: 10px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .oauth-btn:hover { border-color: #C5BDB8; background: #F5F1EE; }
+    .oauth-btn.yandex { background: #FC3F1D; border-color: #FC3F1D; color: #fff; }
+    .oauth-btn.yandex:hover { background: #e03618; border-color: #e03618; }
+    #tg-container { display: flex; justify-content: center; margin-top: 4px; margin-bottom: 4px; }
+    .error {
+      font-size: 13px;
+      color: #E72350;
+      text-align: center;
+      margin-top: 4px;
+      display: none;
+      min-height: 20px;
+    }
+    .hint { font-size: 14px; color: #7E6F67; margin-bottom: 16px; line-height: 1.5; }
+    .footer {
+      font-size: 12px;
+      color: #B8AFA9;
+      text-align: center;
+      margin-top: 24px;
+      line-height: 1.75;
+    }
+    .footer a { color: #7E6F67; text-decoration: underline; text-underline-offset: 2px; }
+    .footer a:hover { color: #E72350; }
+    #code-step, #password-step { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 class="card-title">Welcome back</h1>
+    <p class="card-subtitle">Sign in to your account to continue</p>
+
+    <div id="email-step">
+      <div class="field-label">Email address</div>
+      <input type="email" id="email-input" placeholder="yours@example.com" autocomplete="email" />
+      <button class="btn-primary" onclick="handleGetCode()">Send me a code</button>
+      <button class="btn-ghost" onclick="showPasswordStep()">Sign in with username &amp; password</button>
+      <div class="divider">or</div>
+      <a href="${authUrl}/api/auth/google?returnTo=${returnTo}" class="oauth-btn">
+        <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true">
+          <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+          <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+          <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+          <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+        </svg>
+        Continue with Google
+      </a>
+      <a href="${authUrl}/api/auth/yandex?returnTo=${returnTo}" class="oauth-btn yandex">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path fill="#fff" d="M13.32 4H10.9C8.1 4 6.5 5.46 6.5 7.93c0 2.18 1.06 3.4 3.08 4.73L7 20h2.7l2.78-7.05-.6-.37C10.1 11.4 9.2 10.5 9.2 7.93c0-1.55.92-2.46 2.72-2.46h1.4V20H16V4h-2.68z"/>
+        </svg>
+        Continue with Yandex
+      </a>
+      <div id="tg-container"></div>
+      <div id="email-error" class="error"></div>
+    </div>
+
+    <div id="code-step">
+      <button class="back-btn" onclick="showEmailStep()">← Back</button>
+      <div class="field-label">Verification code</div>
+      <p class="hint" id="code-hint">We sent a 6-digit code to your email. It expires in 10 minutes.</p>
+      <input type="number" id="code-input" placeholder="000000" autocomplete="one-time-code" maxlength="6" />
+      <button class="btn-primary" onclick="handleVerifyCode()">Verify code</button>
+      <button class="btn-ghost" onclick="handleGetCode()">Resend code</button>
+      <div id="code-error" class="error"></div>
+    </div>
+
+    <div id="password-step">
+      <button class="back-btn" onclick="showEmailStep()">← Back</button>
+      <div class="field-label">Username</div>
+      <input type="text" id="username" placeholder="Your username" autocomplete="username" />
+      <div class="field-label">Password</div>
+      <input type="password" id="password" placeholder="Your password" autocomplete="current-password" />
+      <button class="btn-primary" onclick="handlePasswordLogin()">Sign in</button>
+      <div id="pwd-error" class="error"></div>
+    </div>
+
+    <div class="footer">
+      By continuing you agree to our
+      <a href="${authUrl}/terms" target="_blank">Terms of Use</a>
+      and
+      <a href="${authUrl}/privacy" target="_blank">Privacy Policy</a>.
+    </div>
+  </div>
+
+<script>
+const authUrl = "${authUrl}";
+const returnTo = decodeURIComponent("${returnTo}");
+
+${hasTelegram ? `
+(function() {
+  const s = document.createElement("script");
+  s.src = "https://telegram.org/js/telegram-widget.js?22";
+  s.setAttribute("data-telegram-login", "${tgBotName}");
+  s.setAttribute("data-size", "large");
+  s.setAttribute("data-auth-url", authUrl + "/api/auth/telegram");
+  s.setAttribute("data-request-access", "write");
+  s.async = true;
+  document.getElementById("tg-container").appendChild(s);
+})();
+` : ""}
+
+function showEmailStep() {
+  document.getElementById("email-step").style.display = "block";
+  document.getElementById("code-step").style.display = "none";
+  document.getElementById("password-step").style.display = "none";
+  document.getElementById("email-input").focus();
+}
+function showPasswordStep() {
+  document.getElementById("email-step").style.display = "none";
+  document.getElementById("code-step").style.display = "none";
+  document.getElementById("password-step").style.display = "block";
+  document.getElementById("username").focus();
+}
+function showCodeStep(email) {
+  document.getElementById("email-step").style.display = "none";
+  document.getElementById("code-step").style.display = "block";
+  document.getElementById("password-step").style.display = "none";
+  document.getElementById("code-hint").textContent =
+    "We sent a 6-digit code to " + email + ". It expires in 10 minutes.";
+  document.getElementById("code-input").focus();
+}
+
+async function handleGetCode() {
+  const email = document.getElementById("email-input").value.trim();
+  const errEl = document.getElementById("email-error");
+  errEl.style.display = "none";
+  if (!email || !email.includes("@")) {
+    errEl.textContent = "Please enter a valid email address.";
+    errEl.style.display = "block";
+    return;
+  }
+  try {
+    const res = await fetch(authUrl + "/api/auth/magic-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ email }),
+    });
+    if (res.ok) {
+      showCodeStep(email);
+    } else if (res.status === 501) {
+      errEl.textContent = "Email sign-in coming soon — please use Google, Yandex, or password.";
+      errEl.style.display = "block";
+    } else {
+      errEl.textContent = "Could not send code. Please try Google or Yandex instead.";
+      errEl.style.display = "block";
+    }
+  } catch {
+    errEl.textContent = "Network error — please try again.";
+    errEl.style.display = "block";
+  }
+}
+
+async function handleVerifyCode() {
+  const email = document.getElementById("email-input").value.trim();
+  const code  = document.getElementById("code-input").value.trim();
+  const errEl = document.getElementById("code-error");
+  errEl.style.display = "none";
+  if (code.length < 6) {
+    errEl.textContent = "Please enter the full 6-digit code.";
+    errEl.style.display = "block";
+    return;
+  }
+  try {
+    const res = await fetch(authUrl + "/api/auth/verify-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ email, code }),
+    });
+    if (res.ok) {
+      window.location.href = returnTo;
+    } else {
+      errEl.textContent = "Incorrect or expired code — please try again.";
+      errEl.style.display = "block";
+    }
+  } catch {
+    errEl.textContent = "Network error — please try again.";
+    errEl.style.display = "block";
+  }
+}
+
+async function handlePasswordLogin() {
+  const errEl = document.getElementById("pwd-error");
+  errEl.style.display = "none";
+  const res = await fetch(authUrl + "/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      username: document.getElementById("username").value,
+      password: document.getElementById("password").value,
+    }),
+  });
+  if (res.ok) {
+    window.location.href = returnTo;
+  } else {
+    errEl.textContent = "Incorrect username or password.";
+    errEl.style.display = "block";
+  }
+}
+
+document.addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  if (document.getElementById("code-step").style.display === "block")          handleVerifyCode();
+  else if (document.getElementById("password-step").style.display === "block") handlePasswordLogin();
+  else handleGetCode();
+});
+</script>
+</body>
+</html>\`);
+
+registerMagicCodeRoutes(app);
+registerNotifyRoutes(app);
+registerTelegramLinkRoutes(app);
+app.use("/api/user", matchProfileRouter);
+
+// ── GET /api/admin/users ───────────────────────────────────────────────────
+const VALID_ROLES = ["free", "premium", "host", "curator", "admin"];
+
+function isAdminOrService(req: any): boolean {
+  const serviceSecret = process.env.SERVICE_SECRET;
+  if (serviceSecret && req.headers["x-service-secret"] === serviceSecret) return true;
+  return req.isAuthenticated?.() && (req.user as any)?.role === "admin";
+}
+
+app.get("/api/admin/users", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const allUsers = await db.select({
+      id:          users.id,
+      username:    users.username,
+      displayName: users.displayName,
+      email:       users.email,
+      avatarUrl:   users.avatarUrl,
+      role:        users.role,
+      telegramId:  users.telegramId,
+      googleId:    users.googleId,
+      yandexId:    users.yandexId,
+      createdAt:   users.createdAt,
+    }).from(users);
+    res.json(allUsers);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /api/admin/users/:id/role ───────────────────────────────────────
+app.patch("/api/admin/users/:id/role", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+
+  const targetId = parseInt(req.params.id);
+  const { role } = req.body;
+
+  if (!VALID_ROLES.includes(role)) {
+    return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(", ")}` });
+  }
+  if (req.isAuthenticated?.() && (req.user as any)?.id === targetId) {
+    return res.status(400).json({ error: "Cannot change your own role" });
+  }
+
+  try {
+    await db.update(users).set({ role }).where(eq(users.id, targetId));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/auth/change-password ────────────────────────────────────────
+app.post("/api/auth/change-password", async (req: any, res: any) => {
+  if (!req.isAuthenticated?.() || !req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: "Both currentPassword and newPassword are required" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "New password must be at least 8 characters" });
+  }
+
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
+    if (!user?.password) {
+      return res.status(400).json({ error: "No password set on this account — use Set Password instead." });
+    }
+
+    const valid = await comparePasswords(currentPassword, user.password);
+    if (!valid) {
+      return res.status(400).json({ error: "Current password is incorrect" });
+    }
+
+    const hashed = await hashPassword(newPassword);
+    await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/auth/set-password ───────────────────────────────────────────
+app.post("/api/auth/set-password", async (req: any, res: any) => {
+  if (!req.isAuthenticated?.() || !req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const { newPassword } = req.body;
+
+  if (!newPassword) {
+    return res.status(400).json({ error: "newPassword is required" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters" });
+  }
+
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
+    if (user?.password) {
+      return res.status(400).json({ error: "Account already has a password. Use Change Password instead." });
+    }
+
+    const hashed = await hashPassword(newPassword);
+    await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Global error handler ──────────────────────────────────────────────────
+app.use((err: any, _req: any, res: any, _next: any) => {
+  console.error("[meh-auth] Error:", err.message);
+  const status = err.status ?? err.statusCode ?? 500;
+  res.status(status).json({ error: err.message ?? "Internal server error" });
+});
+
+// ── Telegram webhook endpoint (only if WEBHOOK_URL is set) ────────────────
+const webhookPath = "/telegram";
+if (process.env.WEBHOOK_URL) {
+  app.post(webhookPath, async (req, res) => {
+    try {
+      await bot.handleUpdate(req.body);
+      res.sendStatus(200);
+    } catch (err) {
+      console.error("[webhook] Error:", err);
+      res.sendStatus(500);
+    }
+  });
+  console.log(`[meh-auth] Webhook endpoint ready at ${webhookPath}`);
+}
+
+// ── Start ─────────────────────────────────────────────────────────────────
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[meh-auth] Running on port ${PORT} (${process.env.NODE_ENV ?? "development"})`);
+  console.log(`[meh-auth] Cookie domain: ${process.env.COOKIE_DOMAIN ?? "not set"}`);
+  console.log(`[meh-auth] Allowed origins: ${process.env.ALLOWED_ORIGINS ?? "none set"}`);
+  // The bot starts automatically via startBot() inside bot.ts
+  scheduleMatcher();
+});
