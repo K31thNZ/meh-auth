@@ -191,6 +191,7 @@ app.get("/privacy", (_req, res) => {
 </body>
 </html>`);
 });
+
 // ── Login page ─────────────────────────────────────────────────────────────
 app.get("/login", (req, res) => {
   const returnTo = encodeURIComponent((req.query.returnTo as string) ?? "/");
@@ -198,7 +199,7 @@ app.get("/login", (req, res) => {
   const tgBotName = process.env.TELEGRAM_BOT_NAME ?? "";
   const hasTelegram = !!tgBotName;
 
-  // Avoid nested template literals – build the widget script separately
+  // Build the Telegram widget script OUTSIDE the template literal to avoid nesting issues
   const telegramWidgetScript = hasTelegram
     ? `
 (function() {
@@ -567,4 +568,155 @@ document.addEventListener("keydown", e => {
 </script>
 </body>
 </html>\`);
+});
+
+registerMagicCodeRoutes(app);
+registerNotifyRoutes(app);
+registerTelegramLinkRoutes(app);
+app.use("/api/user", matchProfileRouter);
+
+// ── GET /api/admin/users ───────────────────────────────────────────────────
+const VALID_ROLES = ["free", "premium", "host", "curator", "admin"];
+
+function isAdminOrService(req: any): boolean {
+  const serviceSecret = process.env.SERVICE_SECRET;
+  if (serviceSecret && req.headers["x-service-secret"] === serviceSecret) return true;
+  return req.isAuthenticated?.() && (req.user as any)?.role === "admin";
+}
+
+app.get("/api/admin/users", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const allUsers = await db.select({
+      id:          users.id,
+      username:    users.username,
+      displayName: users.displayName,
+      email:       users.email,
+      avatarUrl:   users.avatarUrl,
+      role:        users.role,
+      telegramId:  users.telegramId,
+      googleId:    users.googleId,
+      yandexId:    users.yandexId,
+      createdAt:   users.createdAt,
+    }).from(users);
+    res.json(allUsers);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /api/admin/users/:id/role ───────────────────────────────────────
+app.patch("/api/admin/users/:id/role", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+
+  const targetId = parseInt(req.params.id);
+  const { role } = req.body;
+
+  if (!VALID_ROLES.includes(role)) {
+    return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(", ")}` });
+  }
+  if (req.isAuthenticated?.() && (req.user as any)?.id === targetId) {
+    return res.status(400).json({ error: "Cannot change your own role" });
+  }
+
+  try {
+    await db.update(users).set({ role }).where(eq(users.id, targetId));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/auth/change-password ────────────────────────────────────────
+app.post("/api/auth/change-password", async (req: any, res: any) => {
+  if (!req.isAuthenticated?.() || !req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: "Both currentPassword and newPassword are required" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "New password must be at least 8 characters" });
+  }
+
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
+    if (!user?.password) {
+      return res.status(400).json({ error: "No password set on this account — use Set Password instead." });
+    }
+
+    const valid = await comparePasswords(currentPassword, user.password);
+    if (!valid) {
+      return res.status(400).json({ error: "Current password is incorrect" });
+    }
+
+    const hashed = await hashPassword(newPassword);
+    await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/auth/set-password ───────────────────────────────────────────
+app.post("/api/auth/set-password", async (req: any, res: any) => {
+  if (!req.isAuthenticated?.() || !req.user) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const { newPassword } = req.body;
+
+  if (!newPassword) {
+    return res.status(400).json({ error: "newPassword is required" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters" });
+  }
+
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
+    if (user?.password) {
+      return res.status(400).json({ error: "Account already has a password. Use Change Password instead." });
+    }
+
+    const hashed = await hashPassword(newPassword);
+    await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Global error handler ──────────────────────────────────────────────────
+app.use((err: any, _req: any, res: any, _next: any) => {
+  console.error("[meh-auth] Error:", err.message);
+  const status = err.status ?? err.statusCode ?? 500;
+  res.status(status).json({ error: err.message ?? "Internal server error" });
+});
+
+// ── Telegram webhook endpoint (only if WEBHOOK_URL is set) ────────────────
+const webhookPath = "/telegram";
+if (process.env.WEBHOOK_URL) {
+  app.post(webhookPath, async (req, res) => {
+    try {
+      await bot.handleUpdate(req.body);
+      res.sendStatus(200);
+    } catch (err) {
+      console.error("[webhook] Error:", err);
+      res.sendStatus(500);
+    }
+  });
+  console.log(`[meh-auth] Webhook endpoint ready at ${webhookPath}`);
+}
+
+// ── Start ─────────────────────────────────────────────────────────────────
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[meh-auth] Running on port ${PORT} (${process.env.NODE_ENV ?? "development"})`);
+  console.log(`[meh-auth] Cookie domain: ${process.env.COOKIE_DOMAIN ?? "not set"}`);
+  console.log(`[meh-auth] Allowed origins: ${process.env.ALLOWED_ORIGINS ?? "none set"}`);
+  // The bot starts automatically via startBot() inside bot.ts
+  scheduleMatcher();
 });
