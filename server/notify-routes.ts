@@ -4,7 +4,7 @@
 
 import type { Express } from "express";
 import { requireAuth, requireAdmin } from "./auth";
-import { notifyMatchingUsers, notifyOrganiserDemand, sendToUser } from "./bot";
+import { notifyMatchingUsers, notifyOrganiserDemand, sendToUser, EventData } from "./bot"; // new import
 import { storage } from "./storage";
 import { db } from "./db";
 import { availabilityMatches, hosts, users } from "@shared/schema";
@@ -20,6 +20,8 @@ const notifyEventSchema = z.object({
   venueCity:    z.string(),
   venueAddress: z.string(),
   description:  z.string(),
+  organizerId:  z.number().optional(),   // new
+  imageUrl:     z.string().url().optional(), // new
 });
 
 // Shared secret — Event-Hub sets this header so only trusted callers can notify
@@ -44,7 +46,31 @@ export function registerNotifyRoutes(app: Express) {
     if (!validateServiceSecret(req, res)) return;
 
     try {
-      const event = notifyEventSchema.parse(req.body);
+      const raw = notifyEventSchema.parse(req.body);
+
+      // Fetch organiser's Telegram ID if an organiser user ID is provided
+      let organizerTelegramId: string | undefined;
+      if (raw.organizerId) {
+        const [orgUser] = await db
+          .select({ telegramId: users.telegramId })
+          .from(users)
+          .where(eq(users.id, raw.organizerId));
+        organizerTelegramId = orgUser?.telegramId ?? undefined;
+      }
+
+      const event: EventData = {
+        id: raw.id,
+        title: raw.title,
+        category: raw.category,
+        date: raw.date,
+        venueCity: raw.venueCity,
+        venueAddress: raw.venueAddress,
+        description: raw.description,
+        organizerId: raw.organizerId ? String(raw.organizerId) : undefined,
+        organizerTelegramId,
+        imageUrl: raw.imageUrl,
+      };
+
       const result = await notifyMatchingUsers(event);
       res.json({ ok: true, ...result });
     } catch (err: any) {
