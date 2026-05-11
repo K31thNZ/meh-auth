@@ -1,7 +1,7 @@
 // shared/schema.ts
 import { sql } from "drizzle-orm";
 import {
-  pgTable, serial, integer, text, boolean, timestamp, jsonb,
+  pgTable, serial, integer, text, boolean, timestamp, jsonb, uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
@@ -42,6 +42,11 @@ export const users = pgTable("users", {
   learningLanguages: jsonb("learning_languages").$type<LanguageEntry[]>().notNull().default(sql`'[]'::jsonb`),
   // Name of the closest Moscow metro station chosen by the user
   metroStation:      text("metro_station"),
+
+  // ── Bot‑related flags ─────────────────────────────────────────────────────
+  blocked:         boolean("blocked").notNull().default(false),
+  language:        text("language").notNull().default("en"),   // "ru" / "en"
+  telegramUsername: text("telegram_username"),                  // e.g. @handle
 });
 
 export const telegramLinkTokens = pgTable("telegram_link_tokens", {
@@ -117,13 +122,51 @@ export const hostApplications = pgTable("host_applications", {
   createdAt:    timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
-// ── Relations (unchanged) ─────────────────────────────────────────────────────
+// ── New tables for bot persistence ────────────────────────────────────────────
+
+export const rsvps = pgTable("rsvps", {
+  id:        serial("id").primaryKey(),
+  userId:    integer("user_id").references(() => users.id, { onDelete: "cascade" }).notNull(),
+  eventId:   integer("event_id").notNull(),                     // references expatevents.org event
+  status:    text("status").notNull(),                          // "going" | "maybe" | "no"
+  sourceChatId:    integer("source_chat_id"),                   // Telegram chat id where RSVP was cast
+  sourceChatTitle: text("source_chat_title"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+}, (table) => ({
+  uniq: uniqueIndex("rsvps_user_event").on(table.userId, table.eventId),
+}));
+
+export const pendingApprovals = pgTable("pending_approvals", {
+  token:     text("token").primaryKey(),
+  eventId:   integer("event_id").notNull(),
+  eventData: jsonb("event_data").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+export const events = pgTable("events", {
+  id:          integer("id").primaryKey(),                      // mirrors expatevents event id
+  title:       text("title").notNull(),
+  category:    text("category").notNull(),
+  date:        timestamp("date", { withTimezone: true }).notNull(),
+  venueCity:   text("venue_city"),
+  venueAddress: text("venue_address"),
+  description: text("description"),
+  organizerId: integer("organizer_id").references(() => users.id, { onDelete: "set null" }),
+  imageUrl:    text("image_url"),
+  dispatched:  boolean("dispatched").notNull().default(true),
+  createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ── Relations (unchanged, extended) ───────────────────────────────────────────
 
 export const usersRelations = relations(users, ({ many }) => ({
   availabilitySlots:   many(availabilitySlots),
   notifications:       many(notifications),
   hosts:               many(hosts),
   telegramLinkTokens:  many(telegramLinkTokens),
+  rsvps:               many(rsvps),
+  organisedEvents:     many(events, { relationName: "organiser" }),
 }));
 
 export const availabilitySlotsRelations = relations(availabilitySlots, ({ one }) => ({
@@ -147,6 +190,18 @@ export const telegramLinkTokensRelations = relations(telegramLinkTokens, ({ one 
   user: one(users, { fields: [telegramLinkTokens.userId], references: [users.id] }),
 }));
 
+export const rsvpsRelations = relations(rsvps, ({ one }) => ({
+  user: one(users, { fields: [rsvps.userId], references: [users.id] }),
+}));
+
+export const eventsRelations = relations(events, ({ one }) => ({
+  organiser: one(users, {
+    fields: [events.organizerId],
+    references: [users.id],
+    relationName: "organiser",
+  }),
+}));
+
 // ── Inferred types ────────────────────────────────────────────────────────────
 
 export type User              = typeof users.$inferSelect;
@@ -155,3 +210,6 @@ export type Notification      = typeof notifications.$inferSelect;
 export type Host              = typeof hosts.$inferSelect;
 export type HostApplication   = typeof hostApplications.$inferSelect;
 export type TelegramLinkToken = typeof telegramLinkTokens.$inferSelect;
+export type Rsvp              = typeof rsvps.$inferSelect;
+export type PendingApproval   = typeof pendingApprovals.$inferSelect;
+export type Event             = typeof events.$inferSelect;
