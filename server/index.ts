@@ -567,7 +567,7 @@ document.addEventListener("keydown", e => {
 });
 </script>
 </body>
-</html>\`);
+</html>`);
 });
 
 registerMagicCodeRoutes(app);
