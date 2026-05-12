@@ -1,5 +1,5 @@
 // server/bot.ts
-// Telegram bot for ExpatEvents — re-architected with grammY, database-backed state,
+// Telegram bot for ExpatEvents — re-architected with grammy, database-backed state,
 // RU/EN localisation, preview cards with images, group-aware RSVP, organiser commands,
 // rate-limiting, and idempotent notifications.
 
@@ -10,8 +10,8 @@ import { users, rsvps, pendingApprovals, events, notifications } from "@shared/s
 import { eq, and, isNotNull, sql } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
 
-// ── Helper types ───────────────────────────────────────────────────────────────
-interface EventData {
+// ── Types ──────────────────────────────────────────────────────────────────
+export interface EventData {
   id: number;
   title: string;
   category: string;
@@ -20,18 +20,17 @@ interface EventData {
   venueAddress: string;
   description: string;
   organizerId?: string;
-  imageUrl?: string;         // new: for photo cards
-  organizerTelegramId?: string; // cached for easy lookup
+  imageUrl?: string;
+  organizerTelegramId?: string;
 }
 
-// Session data for conversations (e.g., /edit)
 interface SessionData {
   editingEventId?: number;
-  awaitingField?: string;  // for step-by-step editing if needed
+  awaitingField?: string;
 }
 type BotContext = Context & SessionFlavor<SessionData> & ConversationFlavor;
 
-// ── Environment & constants ────────────────────────────────────────────────────
+// ── Environment & constants ────────────────────────────────────────────────
 const EXPAT_API_URL = (process.env.EXPAT_API_URL ?? "https://expatevents.org").replace(/\/$/, "");
 const EXPAT_API_SECRET = process.env.EXPAT_API_SECRET ?? "";
 const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID;
@@ -45,8 +44,8 @@ const CATEGORY_ICONS: Record<string, string> = {
 
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-// ── Localization (RU/EN) ─────────────────────────────────────────────────────
-const LOCALE: Record<string, Record<string, string>> = {
+// ── Localization (RU/EN) ──────────────────────────────────────────────────
+const LOCALE: Record<string, Record<string, any>> = {
   ru: {
     welcome: "👋 Добро пожаловать в *ExpatEvents*!\n\nЯ оповещаю о событиях, которые вам интересны.",
     accountLinked: "✅ *Ваш аккаунт ExpatEvents привязан!*\n\nВы будете получать уведомления о мероприятиях.",
@@ -58,7 +57,9 @@ const LOCALE: Record<string, Record<string, string>> = {
     cleared: "Ответ удалён.",
     newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
       `${icon} *Новое событие в категории ${cat}*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[Подробнее](https://expatevents.org/events/${id})`,
-    // ... many more
+    demandSignal: (count: number, day: string, hour: string, cat: string) =>
+      `*${count} экспатов* свободны в *${day} в ${hour}* и интересуются *${cat}*.\nПодумайте о проведении мероприятия!`,
+    eventLive: "🎉 *Ваше событие опубликовано!* …",
   },
   en: {
     welcome: "👋 Welcome to *ExpatEvents*!\n\nI'll keep you updated on events matching your interests.",
@@ -71,6 +72,9 @@ const LOCALE: Record<string, Record<string, string>> = {
     cleared: "Response cleared.",
     newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
       `${icon} *New ${cat} event*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[View event](https://expatevents.org/events/${id})`,
+    demandSignal: (count: number, day: string, hour: string, cat: string) =>
+      `*${count} expats* are free on *${day} at ${hour}* and interested in *${cat}*.\nConsider hosting an event!`,
+    eventLive: "🎉 *Your event is live!* …",
   }
 };
 function t(ctx: Context, key: string, ...args: any[]): string {
@@ -83,7 +87,7 @@ function tStatic(lang: string, key: string, ...args: any[]): string {
   return typeof loc === "function" ? loc(...args) : loc;
 }
 
-// ── Date / Time helpers ─────────────────────────────────────────────────────
+// ── Date / Time helpers ────────────────────────────────────────────────────
 function safeMoscowStr(utcDate: any): string {
   try {
     const d = new Date(utcDate);
@@ -101,22 +105,20 @@ function fmtHour(h: number): string {
   return `${String(h).padStart(2, "0")}:00`;
 }
 
-// ── DB helpers ──────────────────────────────────────────────────────────────
+// ── DB helpers ─────────────────────────────────────────────────────────────
 async function getUserLang(telegramId: string): Promise<string> {
   const [user] = await db.select({ language: users.language }).from(users).where(eq(users.telegramId, telegramId));
   return user?.language ?? "en";
 }
 
-// Mark user as blocked if 403 error
 async function markUserBlocked(telegramId: string): Promise<void> {
   await db.update(users).set({ blocked: true }).where(eq(users.telegramId, telegramId));
   console.log(`[bot] User ${telegramId} marked blocked`);
 }
 
-// Idempotent notification tracking (in-memory per process; survives restart by not re-creating if already sent in this event's dispatch)
-const notifiedForEvent = new Map<number, Set<string>>(); // eventId -> Set<telegramId>
+const notifiedForEvent = new Map<number, Set<string>>();
 
-// ── RSVP persistence ──────────────────────────────────────────────────────
+// ── RSVP persistence ───────────────────────────────────────────────────────
 async function loadRsvpCounts(eventId: number): Promise<{ going: number; maybe: number; no: number }> {
   const rows = await db.select({ status: rsvps.status }).from(rsvps).where(eq(rsvps.eventId, eventId));
   const counts = { going: 0, maybe: 0, no: 0 };
@@ -128,7 +130,6 @@ async function setRsvpStatus(userId: number, eventId: number, status: "going" | 
   if (status === "none") {
     await db.delete(rsvps).where(and(eq(rsvps.userId, userId), eq(rsvps.eventId, eventId)));
   } else {
-    // Upsert
     await db.insert(rsvps).values({
       userId, eventId, status,
       sourceChatId: sourceChatId ?? null,
@@ -146,7 +147,6 @@ async function setRsvpStatus(userId: number, eventId: number, status: "going" | 
   }
 }
 
-// Get all RSVPs for an event with user details (for organiser)
 async function getEventAttendees(eventId: number): Promise<{ userId: number; telegramId?: string; username?: string; status: string; sourceChatTitle?: string }[]> {
   const rows = await db.select({
     userId: rsvps.userId,
@@ -155,7 +155,10 @@ async function getEventAttendees(eventId: number): Promise<{ userId: number; tel
   }).from(rsvps).where(eq(rsvps.eventId, eventId));
   const result = [];
   for (const row of rows) {
-    const [user] = await db.select({ telegramId: users.telegramId, username: users.username }).from(users).where(eq(users.id, row.userId));
+    const [user] = await db.select({
+      telegramId: users.telegramId,
+      username: users.telegramUsername
+    }).from(users).where(eq(users.id, row.userId));
     result.push({ ...row, telegramId: user?.telegramId, username: user?.username });
   }
   return result;
@@ -179,15 +182,14 @@ async function getPendingApproval(token: string): Promise<EventData | null> {
     and(eq(pendingApprovals.token, token), sql`${pendingApprovals.expiresAt} > NOW()`)
   );
   if (!row) return null;
-  const data = JSON.parse(row.eventData);
-  return data as EventData;
+  return JSON.parse(row.eventData) as EventData;
 }
 
 async function deletePendingApproval(token: string): Promise<void> {
   await db.delete(pendingApprovals).where(eq(pendingApprovals.token, token));
 }
 
-// ── Event store (cached locally) ──────────────────────────────────────────
+// ── Event store (cached locally) ───────────────────────────────────────────
 async function saveEvent(event: EventData): Promise<void> {
   await db.insert(events).values({
     id: event.id,
@@ -201,11 +203,29 @@ async function saveEvent(event: EventData): Promise<void> {
     imageUrl: event.imageUrl,
     dispatched: true,
     createdAt: new Date(),
+  }).onConflictDoUpdate({
+    target: [events.id],
+    set: {
+      title: event.title,
+      category: event.category,
+      date: event.date,
+      venueCity: event.venueCity,
+      venueAddress: event.venueAddress,
+      description: event.description,
+      imageUrl: event.imageUrl,
+    }
   });
 }
 
-// ── Notification queue (simple delay-based) ───────────────────────────────
-const notificationQueue: Array<{ userId: number; telegramId: string; text: string; imageUrl?: string; keyboard: InlineKeyboard; lang: string }> = [];
+// ── Notification queue ─────────────────────────────────────────────────────
+const notificationQueue: Array<{
+  userId: number;
+  telegramId: string;
+  text: string;
+  imageUrl?: string;
+  keyboard: InlineKeyboard;
+  lang: string;
+}> = [];
 let processingQueue = false;
 
 async function processQueue(): Promise<void> {
@@ -227,11 +247,9 @@ async function processQueue(): Promise<void> {
         });
       }
     } catch (err: any) {
-      if (err?.error_code === 403) {
-        await markUserBlocked(item.telegramId);
-      }
+      if (err?.error_code === 403) await markUserBlocked(item.telegramId);
     }
-    // Rate-limit: 30 msg/sec (Telegram limit), we can throttle
+    // Telegram rate limit: 30 msg/sec, we play safe with 50ms delay
     await new Promise(r => setTimeout(r, 50));
   }
   processingQueue = false;
@@ -242,17 +260,13 @@ function enqueueNotification(notification: typeof notificationQueue[number]): vo
   processQueue();
 }
 
-// ── Bot instance & rate-limiting in-memory ────────────────────────────────
-const bot = new Bot<BotContext>(process.env.TELEGRAM_BOT_TOKEN!);
-const rsvpCooldown = new Map<string, number>(); // "userId:eventId" -> last tap timestamp
+// ── Bot instance and rate‑limiting ─────────────────────────────────────────
+export const bot = new Bot<BotContext>(process.env.TELEGRAM_BOT_TOKEN!);
+const rsvpCooldown = new Map<string, number>();
 
-// ── Middleware ─────────────────────────────────────────────────────────────
+// ── Middleware ──────────────────────────────────────────────────────────────
 bot.use(session({ initial: () => ({}) }));
 bot.use(conversations());
-bot.use(async (ctx, next) => {
-  // Attach user language to session? We'll just use ctx.from.language_code
-  await next();
-});
 
 // ── /start ─────────────────────────────────────────────────────────────────
 bot.command("start", async (ctx) => {
@@ -269,12 +283,12 @@ bot.command("start", async (ctx) => {
   await ctx.reply(t(ctx, "welcome"), { parse_mode: "Markdown" });
 });
 
-// ── /help ─────────────────────────────────────────────────────────────────
+// ── /help ──────────────────────────────────────────────────────────────────
 bot.command("help", async (ctx) => {
   await ctx.reply(t(ctx, "helpText"), { parse_mode: "Markdown" });
 });
 
-// ── Organiser commands ────────────────────────────────────────────────────
+// ── Organiser commands ─────────────────────────────────────────────────────
 async function getOrganiserTelegramId(ctx: Context): Promise<string | null> {
   const user = await db.select({ id: users.id }).from(users).where(eq(users.telegramId, String(ctx.from!.id)));
   return user?.[0]?.id ? String(user[0].id) : null;
@@ -300,7 +314,6 @@ bot.command("myevents", async (ctx) => {
   }
 });
 
-// Generic handler for /attendees_{id}
 bot.hears(/^\/attendees_(\d+)/, async (ctx) => {
   const eventId = parseInt(ctx.match[1]);
   const attendees = await getEventAttendees(eventId);
@@ -318,13 +331,11 @@ bot.hears(/^\/attendees_(\d+)/, async (ctx) => {
   await ctx.reply(msg, { parse_mode: "Markdown" });
 });
 
-// /edit_{id} -> provide link to web app
 bot.hears(/^\/edit_(\d+)/, async (ctx) => {
   const eventId = parseInt(ctx.match[1]);
   await ctx.reply(`Edit your event: https://expatevents.org/events/${eventId}/edit`);
 });
 
-// /reshare_{id} -> resend preview card
 bot.hears(/^\/reshare_(\d+)/, async (ctx) => {
   const eventId = parseInt(ctx.match[1]);
   const [event] = await db.select().from(events).where(eq(events.id, eventId));
@@ -332,7 +343,6 @@ bot.hears(/^\/reshare_(\d+)/, async (ctx) => {
     await ctx.reply("Event not found.");
     return;
   }
-  // Build preview card and send to organiser
   const cardText = buildPreviewCardText(event as EventData);
   const counts = await loadRsvpCounts(eventId);
   const keyboard = rsvpKeyboardForCounts(eventId, counts);
@@ -351,7 +361,7 @@ bot.hears(/^\/reshare_(\d+)/, async (ctx) => {
   }
 });
 
-// ── Demand signal follow-up (enhanced) ──────────────────────────────────────
+// ── Demand signal follow-up (enhanced) ─────────────────────────────────────
 export async function notifyOrganiserDemand(organiserId: number, match: {
   category: string;
   day: number;
@@ -369,9 +379,8 @@ export async function notifyOrganiserDemand(organiserId: number, match: {
   const keyboard = new InlineKeyboard().url("✨ Create event", createUrl);
   await bot.api.sendMessage(organiser.telegramId, `${icon} ${text}`, { parse_mode: "Markdown", reply_markup: keyboard });
 }
-// Add missing localization: we'll add "demandSignal" to LOCALE
 
-// ── RSVP keyboard builders (with real counts from DB) ───────────────────────
+// ── RSVP keyboard builders ─────────────────────────────────────────────────
 function rsvpKeyboardForCounts(eventId: number, counts: { going: number; maybe: number; no: number }): InlineKeyboard {
   return new InlineKeyboard()
     .text(`✅ Going${counts.going ? ` (${counts.going})` : ""}`, `rsvp:going:${eventId}`)
@@ -379,7 +388,7 @@ function rsvpKeyboardForCounts(eventId: number, counts: { going: number; maybe: 
     .text(`❌ Can't make it${counts.no ? ` (${counts.no})` : ""}`, `rsvp:no:${eventId}`);
 }
 
-// ── Build preview card text (support image) ───────────────────────────────
+// ── Preview card text ──────────────────────────────────────────────────────
 function buildPreviewCardText(event: EventData): string {
   const icon = CATEGORY_ICONS[event.category] ?? "📌";
   const dateStr = safeMoscowStr(event.date);
@@ -392,14 +401,14 @@ function buildPreviewCardText(event: EventData): string {
   );
 }
 
-// ── Send organiser preview card (with image) ──────────────────────────────
+// ── Send organiser preview card ────────────────────────────────────────────
 async function sendOrgPreviewCard(event: EventData): Promise<void> {
   if (!event.organizerTelegramId) return;
   const cardText = buildPreviewCardText(event);
   const counts = await loadRsvpCounts(event.id);
   const keyboard = rsvpKeyboardForCounts(event.id, counts);
-  const lang = (await db.select({ language: users.language }).from(users).where(eq(users.telegramId, event.organizerTelegramId)))?.[0]?.language ?? "en";
-  const intro = tStatic(lang, "eventLive"); // need to add
+  const lang = (await getUserLang(event.organizerTelegramId));
+  const intro = tStatic(lang, "eventLive");
 
   try {
     await bot.api.sendMessage(event.organizerTelegramId, intro, { parse_mode: "Markdown" });
@@ -420,15 +429,12 @@ async function sendOrgPreviewCard(event: EventData): Promise<void> {
   }
 }
 
-// ── Dispatch notifications (idempotent, queued, image support, block-aware) ──
+// ── Dispatch notifications (idempotent, queued, image support, block‑aware) ─
 export async function dispatchEventNotifications(event: EventData): Promise<{ sent: number; inApp: number }> {
-  if (!bot) return { sent: 0, inApp: 0 };
-
   const matchingUsers = await db.select().from(users).where(
     sql`${event.category} = ANY(${users.interests})`
   );
 
-  // Idempotency per event: skip already notified users in this run
   if (!notifiedForEvent.has(event.id)) notifiedForEvent.set(event.id, new Set());
 
   const icon = CATEGORY_ICONS[event.category] ?? "📌";
@@ -439,9 +445,9 @@ export async function dispatchEventNotifications(event: EventData): Promise<{ se
   const alreadyNotified = notifiedForEvent.get(event.id)!;
 
   for (const user of matchingUsers) {
-    if (alreadyNotified.has(user.telegramId!)) continue; // already dispatched in this session
+    if (user.telegramId && alreadyNotified.has(user.telegramId)) continue;
 
-    // In-app notification
+    // In‑app notification
     await db.insert(notifications).values({
       userId: user.id,
       type: "new_event",
@@ -453,11 +459,11 @@ export async function dispatchEventNotifications(event: EventData): Promise<{ se
     });
     inApp++;
 
-    // Telegram notification with queue
+    // Telegram notification
     if (user.telegramId && !user.blocked) {
-      const lang = user.language ?? "en";
+      const lang = getUserLang ? await getUserLang(user.telegramId) : "en";
       const text = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.venueAddress, desc, event.id);
-      const counts = await loadRsvpCounts(event.id); // live counts
+      const counts = await loadRsvpCounts(event.id);
       const keyboard = rsvpKeyboardForCounts(event.id, counts);
       enqueueNotification({
         userId: user.id,
@@ -467,12 +473,11 @@ export async function dispatchEventNotifications(event: EventData): Promise<{ se
         keyboard,
         lang,
       });
-      alreadyNotified.add(user.telegramId!);
+      alreadyNotified.add(user.telegramId);
       sent++;
     }
   }
 
-  // Save event to local store
   await saveEvent(event);
   return { sent, inApp };
 }
@@ -480,7 +485,6 @@ export async function dispatchEventNotifications(event: EventData): Promise<{ se
 // ── Admin approval flow ────────────────────────────────────────────────────
 export async function notifyMatchingUsers(event: EventData): Promise<{ sent: number; inApp: number }> {
   if (!ADMIN_TELEGRAM_ID) {
-    // auto-dispatch if no admin
     const result = await dispatchEventNotifications(event);
     await sendOrgPreviewCard(event);
     return result;
@@ -510,14 +514,13 @@ export async function notifyMatchingUsers(event: EventData): Promise<{ sent: num
   return { sent: 0, inApp: 0 };
 }
 
-// ── Callback handlers ───────────────────────────────────────────────────────
+// ── Callback handlers ──────────────────────────────────────────────────────
 bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   const status = ctx.match[1] as "going" | "maybe" | "no";
   const eventId = parseInt(ctx.match[2]);
   const userId = ctx.from.id;
   const key = `${userId}:${eventId}`;
 
-  // Rate-limiting: 2 seconds cooldown
   const now = Date.now();
   if (rsvpCooldown.has(key) && now - rsvpCooldown.get(key)! < 2000) {
     await ctx.answerCallbackQuery({ text: "Please wait a moment", show_alert: false });
@@ -525,26 +528,22 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   }
   rsvpCooldown.set(key, now);
 
-  // Check user linked
   const [user] = await db.select({ id: users.id }).from(users).where(eq(users.telegramId, String(userId)));
   if (!user) {
     await ctx.answerCallbackQuery({ text: "Link your account first!", show_alert: true });
     return;
   }
 
-  // Determine previous status
   const [existing] = await db.select({ status: rsvps.status }).from(rsvps).where(and(eq(rsvps.userId, user.id), eq(rsvps.eventId, eventId)));
   const oldStatus = existing?.status;
   const newStatus = (oldStatus === status) ? "none" : status;
 
-  // Record source (group/private)
   const chat = ctx.chat;
   const sourceChatId = chat?.id ?? 0;
   const sourceChatTitle = "title" in (chat ?? {}) ? (chat as any).title : undefined;
 
   await setRsvpStatus(user.id, eventId, newStatus, sourceChatId ?? 0, sourceChatTitle);
 
-  // Answer callback
   const lang = user.language ?? "en";
   if (newStatus === "none") {
     await ctx.answerCallbackQuery({ text: tStatic(lang, "cleared") });
@@ -552,16 +551,10 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery({ text: tStatic(lang, newStatus as any) ?? "" });
   }
 
-  // Update keyboard
   const counts = await loadRsvpCounts(eventId);
   const newKeyboard = rsvpKeyboardForCounts(eventId, counts);
   await ctx.editMessageReplyMarkup({ reply_markup: newKeyboard }).catch(() => {});
 
-  // Update organiser card (if any) — we'd need a reference to the organiser message.
-  // For simplicity, we'll skip auto-update here; organiser can regenerate via /reshare.
-  // In a full implementation you'd store organiser message ids.
-
-  // Write-back to expat API
   try {
     await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`, {
       method: "POST",
@@ -593,7 +586,7 @@ bot.callbackQuery(/^decline_event:(.+)$/, async (ctx) => {
   await ctx.editMessageText(ctx.msg?.text + "\n\n❌ *Declined*", { parse_mode: "Markdown" });
 });
 
-// ── Admin batch approval, search, stats ────────────────────────────────────
+// ── Admin commands ─────────────────────────────────────────────────────────
 bot.command("pending", async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_TELEGRAM_ID) return;
   const rows = await db.select().from(pendingApprovals).where(sql`${pendingApprovals.expiresAt} > NOW()`);
@@ -644,19 +637,44 @@ bot.command("stats", async (ctx) => {
   await ctx.reply(`Events: ${totalEvents}\nRSVPs: ${totalRsvps}`);
 });
 
+// ── Utils for matcher (compatibility) ──────────────────────────────────────
+export async function notifyAdminAvailabilityMatch(_match: any): Promise<void> {
+  // Individual-match notifications suppressed — report batching handles this.
+}
+
+export async function sendMatchReport(matches: any[]): Promise<void> {
+  if (!ADMIN_TELEGRAM_ID || matches.length === 0) return;
+  // Simplified: just send a count for now. Full report logic can be extended.
+  try {
+    await bot.api.sendMessage(ADMIN_TELEGRAM_ID, `Match report: ${matches.length} new matches`);
+  } catch (err) {
+    console.error("[bot] Failed to send match report:", err);
+  }
+}
+
+// Send a message to a user by Telegram ID (used by other modules)
+export async function sendToUser(telegramId: string, text: string): Promise<boolean> {
+  try {
+    await bot.api.sendMessage(telegramId, text, { parse_mode: "Markdown" });
+    return true;
+  } catch (err: any) {
+    console.error(`[bot] Failed to send to ${telegramId}:`, err.message);
+    return false;
+  }
+}
+
 // ── Start bot (webhook or polling) ─────────────────────────────────────────
 async function startBot() {
   if (!process.env.TELEGRAM_BOT_TOKEN) {
     console.warn("[bot] TELEGRAM_BOT_TOKEN not set");
     return;
   }
-  // Use webhook if WEBHOOK_URL is set, else polling
+
   const webhookUrl = process.env.WEBHOOK_URL;
   if (webhookUrl) {
     console.log("[bot] Starting webhook mode on", webhookUrl);
     await bot.api.setWebhook(`${webhookUrl}/telegram`);
-    // We assume express is used elsewhere to forward POST to bot.handleUpdate
-    // Here we just set the webhook; the actual server logic is outside.
+    // Webhook route is set up in server/index.ts
   } else {
     console.log("[bot] Starting polling mode");
     bot.start({
@@ -664,46 +682,5 @@ async function startBot() {
     });
   }
 }
+
 startBot();
-
-export { bot };
-
-// ── Required DB schema additions (run these migrations) ────────────────────
-/*
-CREATE TABLE IF NOT EXISTS rsvps (
-  id SERIAL PRIMARY KEY,
-  user_id INT NOT NULL,
-  event_id INT NOT NULL,
-  status VARCHAR(10) NOT NULL CHECK (status IN ('going','maybe','no')),
-  source_chat_id BIGINT,
-  source_chat_title VARCHAR(255),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(user_id, event_id)
-);
-
-CREATE TABLE IF NOT EXISTS pending_approvals (
-  token VARCHAR(10) PRIMARY KEY,
-  event_id INT NOT NULL,
-  event_data JSONB NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  expires_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS events (
-  id INT PRIMARY KEY,
-  title VARCHAR(255) NOT NULL,
-  category VARCHAR(50) NOT NULL,
-  date TIMESTAMPTZ NOT NULL,
-  venue_city VARCHAR(100),
-  venue_address TEXT,
-  description TEXT,
-  organizer_id INT,
-  image_url TEXT,
-  dispatched BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-ALTER TABLE users ADD COLUMN blocked BOOLEAN DEFAULT FALSE;
-ALTER TABLE users ADD COLUMN language VARCHAR(5) DEFAULT 'en';
-ALTER TABLE users ADD COLUMN username VARCHAR(255);
-*/
