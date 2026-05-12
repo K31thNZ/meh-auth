@@ -10,15 +10,15 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@grammyjs/conversations": "^1.2.0",
     "bcryptjs": "^2.4.3",
     "connect-pg-simple": "^10.0.0",
     "cors": "^2.8.5",
-    "drizzle-orm": "^0.39.3",
+    "drizzle-orm": "^0.45.2",
     "esbuild": "^0.25.0",
     "express": "^5.0.1",
     "express-session": "^1.19.0",
-    "grammy": "^1.25.0",
-    "@grammyjs/conversations": "^1.2.0",
+    "grammy": "^1.42.0",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "passport-local": "^1.0.0",
