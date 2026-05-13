@@ -2,14 +2,6 @@
 // Telegram bot for ExpatEvents — grammY, database-backed state,
 // RU/EN localisation, preview cards with images, group-aware RSVP,
 // organiser commands, rate-limiting, idempotent notifications.
-//
-// Key fixes vs previous version:
-//   1. approve_event: answerCallbackQuery FIRST, then async work in try/catch
-//   2. editMessageText uses ctx.callbackQuery.message (not ctx.msg which is
-//      undefined in callback handlers) with a plain fallback text
-//   3. users.language / users.blocked guarded with optional chaining so missing
-//      columns don't crash the handler — falls back to "en" / false
-//   4. decline_event same defensive pattern
 
 import { Bot, Context, session, SessionFlavor, InlineKeyboard } from "grammy";
 import { conversations, ConversationFlavor } from "@grammyjs/conversations";
