@@ -1,7 +1,7 @@
 // shared/schema.ts
 import { sql } from "drizzle-orm";
 import {
-  pgTable, serial, integer, text, boolean, timestamp, jsonb, uniqueIndex,
+  pgTable, serial, integer, text, boolean, timestamp, jsonb,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
@@ -36,17 +36,14 @@ export const users = pgTable("users", {
   createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
 
   // ── Phase 1: Smart Match profile ─────────────────────────────────────────
-  // ISO 639-1 code for the user's native language (e.g. "en", "ru")
   nativeLanguage:    text("native_language"),
-  // Array of { code, proficiency } objects — stored as JSONB
   learningLanguages: jsonb("learning_languages").$type<LanguageEntry[]>().notNull().default(sql`'[]'::jsonb`),
-  // Name of the closest Moscow metro station chosen by the user
   metroStation:      text("metro_station"),
 
   // ── Bot‑related flags ─────────────────────────────────────────────────────
   blocked:         boolean("blocked").notNull().default(false),
-  language:        text("language").notNull().default("en"),   // "ru" / "en"
-  telegramUsername: text("telegram_username"),                  // e.g. @handle
+  language:        text("language").notNull().default("en"),
+  telegramUsername: text("telegram_username"),
 });
 
 export const telegramLinkTokens = pgTable("telegram_link_tokens", {
@@ -122,19 +119,7 @@ export const hostApplications = pgTable("host_applications", {
   createdAt:    timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
-// ── New tables for bot persistence ────────────────────────────────────────────
-
-export const rsvps = pgTable("rsvps", {
-  id:        serial("id").primaryKey(),
-  userId:    integer("user_id").references(() => users.id, { onDelete: "cascade" }).notNull(),
-  eventId:   integer("event_id").notNull(),                     // references expatevents.org event
-  status:    text("status").notNull(),                          // "going" | "maybe" | "no"
-  sourceChatId:    integer("source_chat_id"),                   // Telegram chat id where RSVP was cast
-  sourceChatTitle: text("source_chat_title"),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
-}, (table) => ({
-  uniq: uniqueIndex("rsvps_user_event").on(table.userId, table.eventId),
-}));
+// ── Bot cache tables ─────────────────────────────────────────────────────────
 
 export const pendingApprovals = pgTable("pending_approvals", {
   token:     text("token").primaryKey(),
@@ -158,14 +143,13 @@ export const events = pgTable("events", {
   createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
-// ── Relations (unchanged, extended) ───────────────────────────────────────────
+// ── Relations ────────────────────────────────────────────────────────────────
 
 export const usersRelations = relations(users, ({ many }) => ({
   availabilitySlots:   many(availabilitySlots),
   notifications:       many(notifications),
   hosts:               many(hosts),
   telegramLinkTokens:  many(telegramLinkTokens),
-  rsvps:               many(rsvps),
   organisedEvents:     many(events, { relationName: "organiser" }),
 }));
 
@@ -190,10 +174,6 @@ export const telegramLinkTokensRelations = relations(telegramLinkTokens, ({ one 
   user: one(users, { fields: [telegramLinkTokens.userId], references: [users.id] }),
 }));
 
-export const rsvpsRelations = relations(rsvps, ({ one }) => ({
-  user: one(users, { fields: [rsvps.userId], references: [users.id] }),
-}));
-
 export const eventsRelations = relations(events, ({ one }) => ({
   organiser: one(users, {
     fields: [events.organizerId],
@@ -210,6 +190,5 @@ export type Notification      = typeof notifications.$inferSelect;
 export type Host              = typeof hosts.$inferSelect;
 export type HostApplication   = typeof hostApplications.$inferSelect;
 export type TelegramLinkToken = typeof telegramLinkTokens.$inferSelect;
-export type Rsvp              = typeof rsvps.$inferSelect;
 export type PendingApproval   = typeof pendingApprovals.$inferSelect;
 export type Event             = typeof events.$inferSelect;
