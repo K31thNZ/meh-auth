@@ -2,11 +2,12 @@
 // Telegram bot for ExpatEvents — grammY, database-backed state,
 // RU/EN localisation, preview cards with images, group-aware RSVP,
 // organiser commands, rate-limiting, idempotent notifications.
+// RSVPs are now stored in the ExpatEvents database, accessed via its API.
 
 import { Bot, Context, session, SessionFlavor, InlineKeyboard } from "grammy";
 import { conversations, ConversationFlavor } from "@grammyjs/conversations";
 import { db } from "./db";
-import { users, rsvps, pendingApprovals, events, notifications } from "@shared/schema";
+import { users, pendingApprovals, events, notifications } from "@shared/schema"; // rsvps removed
 import { eq, and, isNotNull, sql } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
 
@@ -113,8 +114,6 @@ function fmtHour(h: number): string {
 }
 
 // ── Safe column accessors ──────────────────────────────────────────────────────
-// users.language and users.blocked may not exist in the meh-auth schema yet.
-// We guard with (user as any) so a missing column doesn't throw at query time.
 
 function userLang(user: any): string {
   return (user as any)?.language ?? "en";
@@ -124,7 +123,7 @@ function userBlocked(user: any): boolean {
   return (user as any)?.blocked === true;
 }
 
-// ── DB helpers ─────────────────────────────────────────────────────────────────
+// ── DB helpers (non‑RSVP) ─────────────────────────────────────────────────────
 
 async function getUserLang(telegramId: string): Promise<string> {
   try {
@@ -140,7 +139,6 @@ async function getUserLang(telegramId: string): Promise<string> {
 
 async function markUserBlocked(telegramId: string): Promise<void> {
   try {
-    // Only attempt if column exists; silently skip otherwise
     await db
       .update(users)
       .set({ blocked: true } as any)
@@ -153,23 +151,35 @@ async function markUserBlocked(telegramId: string): Promise<void> {
 
 const notifiedForEvent = new Map<number, Set<string>>();
 
-// ── RSVP persistence ───────────────────────────────────────────────────────────
+// ── RSVP operations — all via ExpatEvents API ─────────────────────────────────
 
-async function loadRsvpCounts(eventId: number): Promise<{ going: number; maybe: number; no: number }> {
+interface RsvpCounts {
+  going: number;
+  maybe: number;
+  no: number;
+}
+
+interface Attendee {
+  userId: number;
+  status: string;
+  telegramId?: string;
+  username?: string;
+  sourceChatTitle?: string;
+}
+
+async function loadRsvpCounts(eventId: number): Promise<RsvpCounts> {
   try {
-    const rows = await db
-      .select({ status: rsvps.status })
-      .from(rsvps)
-      .where(eq(rsvps.eventId, eventId));
-    const counts = { going: 0, maybe: 0, no: 0 };
-    for (const r of rows) {
-      const k = r.status as keyof typeof counts;
-      if (k in counts) counts[k]++;
+    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp-summary`, {
+      headers: { "X-Bot-Secret": EXPAT_API_SECRET },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return { going: data.going ?? 0, maybe: data.maybe ?? 0, no: data.no ?? 0 };
     }
-    return counts;
-  } catch {
-    return { going: 0, maybe: 0, no: 0 };
+  } catch (err: any) {
+    console.error(`[bot] Failed to load RSVP counts for event ${eventId}:`, err?.message);
   }
+  return { going: 0, maybe: 0, no: 0 };
 }
 
 async function setRsvpStatus(
@@ -178,53 +188,47 @@ async function setRsvpStatus(
   status: "going" | "maybe" | "no" | "none",
   sourceChatId?: number,
   sourceChatTitle?: string
-): Promise<void> {
-  if (status === "none") {
-    await db
-      .delete(rsvps)
-      .where(and(eq(rsvps.userId, userId), eq(rsvps.eventId, eventId)));
-  } else {
-    await db
-      .insert(rsvps)
-      .values({
-        userId, eventId, status,
-        sourceChatId:    sourceChatId    ?? null,
-        sourceChatTitle: sourceChatTitle ?? null,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: [rsvps.userId, rsvps.eventId],
-        set: {
-          status,
-          sourceChatId:    sourceChatId    ?? null,
-          sourceChatTitle: sourceChatTitle ?? null,
-          updatedAt: new Date(),
-        },
-      });
+): Promise<RsvpCounts> {
+  try {
+    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bot-Secret": EXPAT_API_SECRET,
+      },
+      body: JSON.stringify({
+        userId: String(userId),
+        status,
+        sourceChatId,
+        sourceChatTitle,
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        going: data.counts?.going ?? 0,
+        maybe: data.counts?.maybe ?? 0,
+        no: data.counts?.no ?? 0,
+      };
+    }
+  } catch (err: any) {
+    console.error(`[bot] RSVP API call failed:`, err?.message);
   }
+  return { going: 0, maybe: 0, no: 0 };
 }
 
-async function getEventAttendees(eventId: number): Promise<{
-  userId: number;
-  telegramId?: string;
-  username?: string;
-  status: string;
-  sourceChatTitle?: string;
-}[]> {
-  const rows = await db
-    .select({ userId: rsvps.userId, status: rsvps.status, sourceChatTitle: rsvps.sourceChatTitle })
-    .from(rsvps)
-    .where(eq(rsvps.eventId, eventId));
-
-  const result = [];
-  for (const row of rows) {
-    const [user] = await db
-      .select({ telegramId: users.telegramId, username: users.username })
-      .from(users)
-      .where(eq(users.id, row.userId));
-    result.push({ ...row, telegramId: user?.telegramId ?? undefined, username: user?.username ?? undefined });
+async function getEventAttendees(eventId: number): Promise<Attendee[]> {
+  try {
+    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/attendees`, {
+      headers: { "X-Bot-Secret": EXPAT_API_SECRET },
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err: any) {
+    console.error(`[bot] Failed to fetch attendees for event ${eventId}:`, err?.message);
   }
-  return result;
+  return [];
 }
 
 // ── Pending approvals ──────────────────────────────────────────────────────────
@@ -321,7 +325,7 @@ async function processQueue(): Promise<void> {
       if (err?.error_code === 403) await markUserBlocked(item.telegramId);
       else console.error(`[bot] Failed to deliver to ${item.telegramId}:`, err?.message);
     }
-    await new Promise(r => setTimeout(r, 50)); // ~20 msg/sec, within Telegram limits
+    await new Promise(r => setTimeout(r, 50));
   }
   processingQueue = false;
 }
@@ -595,7 +599,6 @@ export async function dispatchEventNotifications(
 export async function notifyMatchingUsers(
   event: EventData
 ): Promise<{ sent: number; inApp: number }> {
-  // No admin configured → dispatch immediately
   if (!ADMIN_TELEGRAM_ID) {
     console.warn("[bot] ADMIN_TELEGRAM_ID not set — dispatching without approval");
     const result = await dispatchEventNotifications(event);
@@ -614,7 +617,6 @@ export async function notifyMatchingUsers(
   try {
     token = await storePendingApproval(event);
   } catch (err: any) {
-    // If DB storage fails, fall back to immediate dispatch
     console.error("[bot] Could not store pending approval, dispatching immediately:", err?.message);
     const result = await dispatchEventNotifications(event);
     await sendOrgPreviewCard(event);
@@ -673,7 +675,7 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   }
   rsvpCooldown.set(key, now);
 
-  // Answer immediately so Telegram stops the spinner regardless of what follows
+  // Answer immediately so Telegram stops the spinner
   await ctx.answerCallbackQuery();
 
   const [user] = await db
@@ -686,53 +688,47 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
     return;
   }
 
-  const [existing] = await db
-    .select({ status: rsvps.status })
-    .from(rsvps)
-    .where(and(eq(rsvps.userId, user.id), eq(rsvps.eventId, eventId)));
+  // Determine previous status via API
+  let oldStatus: string | undefined;
+  try {
+    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/my-rsvp`, {
+      headers: {
+        "X-Bot-Secret": EXPAT_API_SECRET,
+        "X-User-Id": String(user.id),
+      },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      oldStatus = data.status;
+    }
+  } catch {}
 
-  const newStatus = (existing?.status === status) ? "none" : status;
+  const newStatus = (oldStatus === status) ? "none" : status;
 
   const chat           = ctx.chat;
   const sourceChatId   = chat?.id ?? 0;
   const sourceChatTitle = chat && "title" in chat ? (chat as any).title : undefined;
 
-  await setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle);
+  // Set RSVP via API and get fresh counts
+  const counts = await setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle);
 
-  // Now send the real answer text
+  // Feedback
   const lang     = await getUserLang(String(userId));
   const feedback = newStatus === "none" ? tStatic(lang, "cleared") : tStatic(lang, newStatus);
   await ctx.answerCallbackQuery({ text: feedback }).catch(() => {});
 
-  // Update keyboard with new counts
-  const counts    = await loadRsvpCounts(eventId);
+  // Update keyboard
   const newKboard = rsvpKeyboardForCounts(eventId, counts);
   await ctx.editMessageReplyMarkup({ reply_markup: newKboard }).catch(() => {});
-
-  // Write-back to expatevents (best-effort)
-  fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json", "X-Bot-Secret": EXPAT_API_SECRET },
-    body:    JSON.stringify({ userId: String(user.id), status: newStatus }),
-  }).catch(err => console.error("[bot] RSVP write-back failed:", err?.message));
 });
 
 // ── Approve event ─────────────────────────────────────────────────────────────
-//
-// FIX 1: answerCallbackQuery FIRST before any async DB work, so Telegram
-//         stops the spinner immediately and doesn't time out.
-// FIX 2: use ctx.callbackQuery.message (not ctx.msg) for editMessageText —
-//         ctx.msg is undefined in callback query handlers in grammY.
-// FIX 3: wrap the editMessageText in its own try/catch so a parse error
-//         or "message not modified" never blocks the dispatch.
 
 bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
   const token = ctx.match[1];
 
-  // ── Answer immediately — stops the Telegram loading spinner ──────────────
   await ctx.answerCallbackQuery({ text: "Approving…" });
 
-  // ── Load the pending approval ─────────────────────────────────────────────
   let event: EventData | null;
   try {
     event = await getPendingApproval(token);
@@ -744,17 +740,14 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
 
   if (!event) {
     await ctx.reply("⚠️ This approval has expired or was already processed.");
-    // Remove the keyboard so it can't be tapped again
     try {
       await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
     } catch { /* ignore */ }
     return;
   }
 
-  // ── Delete from DB immediately (idempotency) ──────────────────────────────
   await deletePendingApproval(token).catch(() => {});
 
-  // ── Mark the admin message as approved (best-effort edit) ─────────────────
   try {
     const adminMsg = ctx.callbackQuery.message;
     if (adminMsg) {
@@ -767,11 +760,9 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
       );
     }
   } catch (editErr: any) {
-    // Non-critical — don't let an edit failure block the actual dispatch
     console.warn("[bot] Could not edit admin approval message:", editErr?.message);
   }
 
-  // ── Dispatch notifications + organiser card ────────────────────────────────
   let result = { sent: 0, inApp: 0 };
   try {
     result = await dispatchEventNotifications(event);
@@ -782,7 +773,6 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
     return;
   }
 
-  // ── Confirmation message to admin ─────────────────────────────────────────
   await ctx.reply(
     `📬 *Notifications sent for "${event.title}"*\n\n` +
     `• *${result.sent}* Telegram messages queued\n` +
@@ -796,10 +786,7 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
 
 bot.callbackQuery(/^decline_event:(.+)$/, async (ctx) => {
   const token = ctx.match[1];
-
-  // Answer immediately
   await ctx.answerCallbackQuery({ text: "Declined." });
-
   await deletePendingApproval(token).catch(() => {});
 
   try {
@@ -873,8 +860,7 @@ bot.command("findevents", async (ctx) => {
 bot.command("stats", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
   const [evtCount] = await db.select({ count: sql<number>`count(*)` }).from(events);
-  const [rsvCount] = await db.select({ count: sql<number>`count(*)` }).from(rsvps);
-  await ctx.reply(`📊 *Stats*\nEvents: ${evtCount.count}\nRSVPs: ${rsvCount.count}`, { parse_mode: "Markdown" });
+  await ctx.reply(`📊 *Stats*\nEvents: ${evtCount.count}\nRSVPs: stored in ExpatEvents`, { parse_mode: "Markdown" });
 });
 
 // ── Compatibility exports (used by matcher.ts / notify-routes.ts) ──────────────
