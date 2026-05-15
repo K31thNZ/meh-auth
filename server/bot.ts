@@ -777,17 +777,13 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
 });
 
 // ── Approve event ─────────────────────────────────────────────────────────────
-// The handler answers the callback immediately, edits the admin message to show
-// progress, then runs dispatch. All steps are individually try/caught so a
-// failure in one does not silently swallow subsequent steps.
-
 bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
   const token = ctx.match[1];
 
-  // 1. Acknowledge the button tap immediately — Telegram requires this within 10 s
+  // 1. Acknowledge the button tap immediately
   await ctx.answerCallbackQuery({ text: "Approving…" }).catch(() => {});
 
-  // 2. Load the pending event from the DB
+  // 2. Load the pending event
   let event: EventData | null = null;
   try {
     event = await getPendingApproval(token);
@@ -800,33 +796,36 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
   if (!event) {
     console.warn(`[bot] approve_event: token "${token}" not found or expired`);
     await ctx.reply("⚠️ This approval has expired or was already processed.");
-    await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() }).catch(() => {});
+    // Remove the inline keyboard so it can’t be tapped again
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
+    } catch { /* ignore */ }
     return;
   }
 
   console.log(`[bot] approve_event: approving event ${event.id} "${event.title}"`);
 
-  // 3. Remove the token so a double-tap cannot dispatch twice
+  // 3. Delete the token immediately (idempotency)
   await deletePendingApproval(token).catch((err: any) =>
     console.warn("[bot] approve_event: could not delete approval token:", err?.message)
   );
 
-  // 4. Edit the admin message to show progress (non-fatal if it fails)
-  try {
-    const adminMsg = ctx.callbackQuery.message;
-    if (adminMsg && "text" in adminMsg) {
+  // 4. Edit the admin message to show progress (best-effort)
+  const adminMsg = ctx.callbackQuery.message;
+  if (adminMsg && "text" in adminMsg) {
+    try {
       await ctx.api.editMessageText(
         adminMsg.chat.id,
         adminMsg.message_id,
-        `${adminMsg.text}\n\n⏳ Dispatching notifications…`,
-        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
+        `${(adminMsg as any).text}\n\n⏳ Dispatching notifications…`,
+        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() }
       );
+    } catch (editErr: any) {
+      console.warn("[bot] approve_event: could not edit admin message:", editErr?.message);
     }
-  } catch (editErr: any) {
-    console.warn("[bot] approve_event: could not edit admin message:", editErr?.message);
   }
 
-  // 5. Dispatch notifications — this is the step that was silently failing
+  // 5. Dispatch notifications
   let result = { sent: 0, inApp: 0 };
   try {
     result = await dispatchEventNotifications(event);
@@ -838,35 +837,32 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
     return;
   }
 
-  // 6. Send organiser their preview card
+  // 6. Send organiser preview card (non-critical)
   try {
     await sendOrgPreviewCard(event);
   } catch (cardErr: any) {
-    // Non-fatal — notifications went out, just the organiser card failed
     console.warn("[bot] approve_event: sendOrgPreviewCard failed:", cardErr?.message);
   }
 
-  // 7. Update the admin message with the final result
-  try {
-    const adminMsg = ctx.callbackQuery.message;
-    if (adminMsg && "text" in adminMsg) {
+  // 7. Final success message
+  const summary = `📬 *Notifications sent for "${event.title}"*\n\n` +
+    `• *${result.sent}* Telegram messages queued\n` +
+    `• *${result.inApp}* in-app notifications created`;
+
+  // Try to update the original admin message, otherwise reply
+  if (adminMsg && "text" in adminMsg) {
+    try {
       await ctx.api.editMessageText(
         adminMsg.chat.id,
         adminMsg.message_id,
-        `${adminMsg.text.replace("\n\n⏳ Dispatching notifications…", "")}\n\n` +
-        `✅ *Done — ${result.sent} Telegram, ${result.inApp} in-app*`,
-        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
+        `${(adminMsg as any).text.replace("\n\n⏳ Dispatching notifications…", "")}\n\n✅ *Done — ${result.sent} Telegram, ${result.inApp} in-app*`,
+        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() }
       );
-      return; // message updated in place — no separate reply needed
-    }
-  } catch { /* fall through to reply */ }
+      return;
+    } catch { /* fall through to reply */ }
+  }
 
-  await ctx.reply(
-    `📬 *Notifications sent for "${event.title}"*\n\n` +
-    `• *${result.sent}* Telegram messages queued\n` +
-    `• *${result.inApp}* in-app notifications created`,
-    { parse_mode: "Markdown" },
-  );
+  await ctx.reply(summary, { parse_mode: "Markdown" });
 });
 
 // ── Decline event ─────────────────────────────────────────────────────────────
