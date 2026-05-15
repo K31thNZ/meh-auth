@@ -6,8 +6,8 @@
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
-// passport-yandex exports Strategy via module.exports, so default import works
-import YandexStrategy from "passport-yandex";
+// passport-yandex exports an object with a Strategy property – named import
+import { Strategy as YandexStrategy } from "passport-yandex";
 import { scrypt, randomBytes, timingSafeEqual, createHash, createHmac } from "crypto";
 import { promisify } from "util";
 import { storage } from "./storage";
