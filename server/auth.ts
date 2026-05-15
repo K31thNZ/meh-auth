@@ -6,7 +6,8 @@
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
-import { Strategy as YandexStrategy } from "passport-yandex";
+// passport-yandex exports Strategy via module.exports, so default import works
+import YandexStrategy from "passport-yandex";
 import { scrypt, randomBytes, timingSafeEqual, createHash, createHmac } from "crypto";
 import { promisify } from "util";
 import { storage } from "./storage";
@@ -34,7 +35,7 @@ export function setupPassport() {
   passport.serializeUser((user: any, done) => done(null, user.id));
   passport.deserializeUser(async (id: number, done) => {
     try {
-      done(null, await storage.getUser(id) ?? false);
+      done(null, (await storage.getUser(id)) ?? false);
     } catch (err) {
       done(err);
     }
@@ -111,6 +112,7 @@ export function setupPassport() {
       } catch (err) { return done(err as Error); }
     }));
   }
+}
 
 // ── Register all auth routes ───────────────────────────────────────────────
 export function registerAuthRoutes(app: Express) {
@@ -200,66 +202,46 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
-// Accept initData from Telegram.WebApp.initData, verifies signature,
-// and logs the user in (or creates account if first time).
-app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
-  try {
-    const { initData } = req.body;
-    if (!initData) {
-      return res.status(400).json({ error: "Missing initData" });
-    }
+  // ── Telegram Mini App ────────────────────────────────────────────────────
+  app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
+    try {
+      const { initData } = req.body;
+      if (!initData) return res.status(400).json({ error: "Missing initData" });
 
-    // Parse the initData query string
-    const params = new URLSearchParams(initData);
-    const data: Record<string, string> = {};
-    for (const [key, value] of params.entries()) {
-      data[key] = value;
-    }
+      const params = new URLSearchParams(initData);
+      const data: Record<string, string> = {};
+      for (const [key, value] of params.entries()) data[key] = value;
 
-    // Verify signature using the bot token
-    if (!verifyTelegramLogin(data, process.env.TELEGRAM_BOT_TOKEN ?? "")) {
-      return res.status(401).json({ error: "Invalid Telegram initData" });
-    }
-
-    // Extract user object (it's a JSON string in the 'user' field)
-    const userStr = data.user;
-    if (!userStr) {
-      return res.status(400).json({ error: "No user data in initData" });
-    }
-
-    const tgUser = JSON.parse(userStr);
-    const telegramId = String(tgUser.id);
-
-    // Find existing user or create a new one
-    let user = await storage.getUserByTelegramId(telegramId);
-    if (!user) {
-      // Generate a unique username based on Telegram info
-      const baseUsername = tgUser.username ?? `tg_${telegramId}`;
-      user = await storage.createUser({
-        username:    await uniqueUsername(baseUsername),
-        password:    null,
-        telegramId,
-        displayName: [tgUser.first_name, tgUser.last_name].filter(Boolean).join(" ") || null,
-        avatarUrl:   tgUser.photo_url ?? null,
-      });
-    }
-
-    // Establish session
-    req.login(user, (err) => {
-      if (err) return next(err);
-      res.json(sanitize(user));
-    });
-  } catch (err) {
-    next(err);
+      if (!verifyTelegramLogin(data, process.env.TELEGRAM_BOT_TOKEN ?? "")) {
+        return res.status(401).json({ error: "Invalid Telegram initData" });
       }
-  });
-  
-  // ── User preferences ──────────────────────────────────────────────────────
 
-  // PATCH /api/user/interests
-  // After saving:
-  //   1. Runs the incremental matcher (admin notified of new 2+ matches)
-  //   2. Sends the user their next upcoming event that matches any interest
+      const userStr = data.user;
+      if (!userStr) return res.status(400).json({ error: "No user data in initData" });
+
+      const tgUser = JSON.parse(userStr);
+      const telegramId = String(tgUser.id);
+
+      let user = await storage.getUserByTelegramId(telegramId);
+      if (!user) {
+        const baseUsername = tgUser.username ?? `tg_${telegramId}`;
+        user = await storage.createUser({
+          username:    await uniqueUsername(baseUsername),
+          password:    null,
+          telegramId,
+          displayName: [tgUser.first_name, tgUser.last_name].filter(Boolean).join(" ") || null,
+          avatarUrl:   tgUser.photo_url ?? null,
+        });
+      }
+
+      req.login(user, (err) => {
+        if (err) return next(err);
+        res.json(sanitize(user));
+      });
+    } catch (err) { next(err); }
+  });
+
+  // ── User preferences ──────────────────────────────────────────────────────
   app.patch("/api/user/interests", requireAuth, async (req, res, next) => {
     try {
       const userId = (req.user as any).id;
@@ -268,12 +250,10 @@ app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
       res.json(sanitize(user!));
 
       setImmediate(async () => {
-        // Run availability matcher
         runIncrementalMatcher(userId).catch(err =>
           console.error("[matcher] interests trigger failed:", err.message)
         );
 
-        // Send next matching event via Telegram if user is connected
         const fresh = await storage.getUser(userId);
         if (!fresh?.telegramId || !interests.length) return;
 
@@ -285,7 +265,6 @@ app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
           const events: any[] = await res2.json();
           const now = Date.now();
 
-          // Find the soonest upcoming published event matching any interest
           const match = events
             .filter(e =>
               e.published &&
@@ -311,7 +290,7 @@ app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
 
           await sendToUser(
             fresh.telegramId,
-            `${icon} *Here\'s your next event*\n\n` +
+            `${icon} *Here's your next event*\n\n` +
             `*${match.title}*\n` +
             `📅 ${dateStr}\n` +
             `📍 ${match.venueAddress}, ${match.venueCity}\n\n` +
@@ -332,9 +311,7 @@ app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
       if (avatarUrl !== undefined) updates.avatarUrl = avatarUrl;
       if (telegramId !== undefined) {
         const tid = String(telegramId).trim();
-        if (!/^\d+$/.test(tid)) {
-          return res.status(400).json({ error: "telegramId must be a numeric string" });
-        }
+        if (!/^\d+$/.test(tid)) return res.status(400).json({ error: "telegramId must be a numeric string" });
         updates.telegramId = tid;
       }
       const user = await storage.updateUser((req.user as any).id, updates);
@@ -343,20 +320,16 @@ app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
   });
 
   // ── Availability ──────────────────────────────────────────────────────────
-
   app.get("/api/availability", requireAuth, async (req, res) => {
     res.json(await storage.getUserSlots((req.user as any).id));
   });
 
-  // PUT /api/availability
-  // After saving slots, runs the incremental matcher in the background.
   app.put("/api/availability", requireAuth, async (req, res, next) => {
     try {
       const userId = (req.user as any).id;
       await storage.setUserSlots(userId, req.body.slots);
       res.json({ ok: true });
 
-      // Fire-and-forget — never delays the response
       setImmediate(() => {
         runIncrementalMatcher(userId).catch(err =>
           console.error("[matcher] availability trigger failed:", err.message)
@@ -450,8 +423,6 @@ export function requireAdmin(req: any, res: any, next: any) {
 // ── Helpers ────────────────────────────────────────────────────────────────
 function sanitize(user: any) {
   const { password, ...safe } = user;
-  // Add hasPassword flag so the frontend can show "Set" vs "Change" without
-  // ever sending the actual hash to the client
   return { ...safe, hasPassword: !!password };
 }
 
@@ -464,7 +435,7 @@ async function uniqueUsername(base: string): Promise<string> {
   let i = 1;
   while (await storage.getUserByUsername(name)) name = `${base}_${i++}`;
   return name;
-  }
+}
 
 function getAllowedOrigins(): string[] {
   return (process.env.ALLOWED_ORIGINS ?? "")
@@ -480,7 +451,7 @@ function storeReturnTo(req: any) {
     (req.session as any).returnTo = returnTo;
   } else {
     (req.session as any).returnTo = allowed[0] ?? "/";
-     }
+  }
 }
 
 function getReturnTo(req: any): string {
@@ -489,13 +460,13 @@ function getReturnTo(req: any): string {
   const separator = r.includes('?') ? '&' : '?';
   r = `${r}${separator}justLoggedIn=true`;
   return r;
-  }
+}
 
 function buildFailureUrl(provider: string): string {
   const origins = getAllowedOrigins();
   const base = origins[0] ?? "/";
   return `${base}/login?error=${provider}`;
-  }
+}
 
 function verifyTelegramLogin(data: Record<string, string>, botToken: string): boolean {
   if (!botToken) return false;
