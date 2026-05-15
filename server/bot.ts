@@ -2,12 +2,13 @@
 // Telegram bot for ExpatEvents — grammY, database-backed state,
 // RU/EN localisation, preview cards with images, group-aware RSVP,
 // organiser commands, rate-limiting, idempotent notifications.
-// RSVPs are now stored in the ExpatEvents database, accessed via its API.
+// RSVPs are stored in the ExpatEvents database, accessed via its API.
+// rsvps.userId stores the meh-auth integer user ID (no FK — cross-database reference).
 
 import { Bot, Context, session, SessionFlavor, InlineKeyboard } from "grammy";
 import { conversations, ConversationFlavor } from "@grammyjs/conversations";
 import { db } from "./db";
-import { users, pendingApprovals, events, notifications } from "@shared/schema"; // rsvps removed
+import { users, pendingApprovals, events, notifications } from "@shared/schema";
 import { eq, and, isNotNull, sql } from "drizzle-orm";
 import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
 
@@ -34,10 +35,11 @@ type BotContext = Context & SessionFlavor<SessionData> & ConversationFlavor;
 
 // ── Environment ────────────────────────────────────────────────────────────────
 
-const EXPAT_API_URL    = (process.env.EXPAT_API_URL ?? "https://expatevents.org").replace(/\/$/, "");
-const EXPAT_API_SECRET = process.env.EXPAT_API_SECRET ?? "";
+const EXPAT_API_URL     = (process.env.EXPAT_API_URL ?? "https://expatevents.org").replace(/\/$/, "");
+const EXPAT_API_SECRET  = process.env.EXPAT_API_SECRET ?? "";
 const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID;
 
+// TODO: move CATEGORY_ICONS to shared/categories.ts to avoid duplication with auth.ts
 const CATEGORY_ICONS: Record<string, string> = {
   networking: "🔗", tech: "💻", culture: "🎨", food: "🍔",
   sports: "⚽", music: "🎵", language: "🌍", outdoor: "🏕️",
@@ -54,12 +56,13 @@ const LOCALE: Record<string, Record<string, any>> = {
     welcome:       "👋 Добро пожаловать в *ExpatEvents*!\n\nЯ оповещаю о событиях, которые вам интересны.",
     accountLinked: "✅ *Ваш аккаунт ExpatEvents привязан!*\n\nВы будете получать уведомления о мероприятиях.",
     linkExpired:   "❌ Ссылка устарела. Создайте новую в настройках аккаунта.",
-    helpText:      "🤖 *Помощь* — я пришлю события по вашим интересам, здесь можно сразу RSVP.",
+    helpText:      "🤖 *Помощь* — я пришлю события по вашим интересам, здесь можно сразу RSVP.\n\n/myevents — ваши мероприятия\n/stop — отписаться от уведомлений",
     going:         "✅ Вы идёте!",
     maybe:         "🤔 Возможно",
     no:            "❌ Не смогу",
     cleared:       "Ответ удалён.",
     eventLive:     "🎉 *Ваше событие опубликовано!*\n\nВот карточка для форварда — люди могут RSVP прямо из Telegram.",
+    stopped:       "🔕 Вы отписались от уведомлений ExpatEvents.\n\nОтправьте /start чтобы снова подписаться.",
     newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
       `${icon} *Новое событие в категории ${cat}*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[Подробнее](https://expatevents.org/events/${id})`,
     demandSignal: (count: number, day: string, hour: string, cat: string) =>
@@ -69,12 +72,13 @@ const LOCALE: Record<string, Record<string, any>> = {
     welcome:       "👋 Welcome to *ExpatEvents*!\n\nI'll keep you updated on events matching your interests.",
     accountLinked: "✅ *Your ExpatEvents account is linked!*\n\nYou'll receive event notifications.",
     linkExpired:   "❌ That link has expired. Please generate a new one from your account settings.",
-    helpText:      "🤖 *Help* — I send you events matching your interests and let you RSVP directly.",
+    helpText:      "🤖 *Help* — I send you events matching your interests and let you RSVP directly.\n\n/myevents — your organised events\n/stop — unsubscribe from notifications",
     going:         "✅ You're going!",
     maybe:         "🤔 Maybe",
     no:            "❌ Can't make it",
     cleared:       "Response cleared.",
     eventLive:     "🎉 *Your event is live!*\n\nHere's your shareable preview card. Forward it to any chat — people can RSVP directly from Telegram.",
+    stopped:       "🔕 You've unsubscribed from ExpatEvents notifications.\n\nSend /start to resubscribe at any time.",
     newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
       `${icon} *New ${cat} event*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[View event](https://expatevents.org/events/${id})`,
     demandSignal: (count: number, day: string, hour: string, cat: string) =>
@@ -123,17 +127,29 @@ function userBlocked(user: any): boolean {
   return (user as any)?.blocked === true;
 }
 
-// ── DB helpers (non‑RSVP) ─────────────────────────────────────────────────────
+// ── DB helpers ─────────────────────────────────────────────────────────────────
 
 async function getUserLang(telegramId: string): Promise<string> {
   try {
     const [user] = await db
-      .select()
+      .select({ language: users.language })
       .from(users)
       .where(eq(users.telegramId, telegramId));
-    return userLang(user);
+    return user?.language ?? "en";
   } catch {
     return "en";
+  }
+}
+
+async function persistUserLanguage(telegramId: string, languageCode: string | undefined): Promise<void> {
+  const lang = languageCode?.startsWith("ru") ? "ru" : "en";
+  try {
+    await db
+      .update(users)
+      .set({ language: lang })
+      .where(eq(users.telegramId, telegramId));
+  } catch {
+    // Non-fatal — language preference is a nice-to-have
   }
 }
 
@@ -149,9 +165,22 @@ async function markUserBlocked(telegramId: string): Promise<void> {
   }
 }
 
+async function markUserUnblocked(telegramId: string): Promise<void> {
+  try {
+    await db
+      .update(users)
+      .set({ blocked: false } as any)
+      .where(eq(users.telegramId, telegramId));
+  } catch {
+    // Non-fatal
+  }
+}
+
 const notifiedForEvent = new Map<number, Set<string>>();
 
-// ── RSVP operations — all via ExpatEvents API ─────────────────────────────────
+// ── RSVP operations — all via ExpatEvents API ──────────────────────────────────
+// rsvps.userId in expatevents stores the meh-auth integer user ID.
+// No FK exists on that column (cross-database reference) — see shared/schema.ts.
 
 interface RsvpCounts {
   going: number;
@@ -183,11 +212,11 @@ async function loadRsvpCounts(eventId: number): Promise<RsvpCounts> {
 }
 
 async function setRsvpStatus(
-  userId: number,
+  mehAuthUserId: number,           // meh-auth integer user ID — stored as-is in expatevents rsvps.userId
   eventId: number,
   status: "going" | "maybe" | "no" | "none",
   sourceChatId?: number,
-  sourceChatTitle?: string
+  sourceChatTitle?: string,
 ): Promise<RsvpCounts> {
   try {
     const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`, {
@@ -197,7 +226,7 @@ async function setRsvpStatus(
         "X-Bot-Secret": EXPAT_API_SECRET,
       },
       body: JSON.stringify({
-        userId: String(userId),
+        userId: mehAuthUserId,       // integer — expatevents accepts this directly
         status,
         sourceChatId,
         sourceChatTitle,
@@ -208,7 +237,7 @@ async function setRsvpStatus(
       return {
         going: data.counts?.going ?? 0,
         maybe: data.counts?.maybe ?? 0,
-        no: data.counts?.no ?? 0,
+        no:    data.counts?.no    ?? 0,
       };
     }
   } catch (err: any) {
@@ -251,7 +280,7 @@ async function getPendingApproval(token: string): Promise<EventData | null> {
     .from(pendingApprovals)
     .where(and(
       eq(pendingApprovals.token, token),
-      sql`${pendingApprovals.expiresAt} > NOW()`
+      sql`${pendingApprovals.expiresAt} > NOW()`,
     ));
   if (!row) return null;
   return JSON.parse(row.eventData as string) as EventData;
@@ -282,8 +311,10 @@ async function saveEvent(event: EventData): Promise<void> {
     .onConflictDoUpdate({
       target: [events.id],
       set: {
-        title: event.title,   category:     event.category,
-        date:  event.date,    venueCity:    event.venueCity,
+        title:        event.title,
+        category:     event.category,
+        date:         event.date,
+        venueCity:    event.venueCity,
         venueAddress: event.venueAddress,
         description:  event.description,
         imageUrl:     event.imageUrl ?? null,
@@ -294,12 +325,12 @@ async function saveEvent(event: EventData): Promise<void> {
 // ── Notification queue ─────────────────────────────────────────────────────────
 
 const notificationQueue: Array<{
-  userId:    number;
+  userId:     number;
   telegramId: string;
-  text:      string;
-  imageUrl?: string;
-  keyboard:  InlineKeyboard;
-  lang:      string;
+  text:       string;
+  imageUrl?:  string;
+  keyboard:   InlineKeyboard;
+  lang:       string;
 }> = [];
 let processingQueue = false;
 
@@ -346,18 +377,39 @@ bot.use(conversations());
 // ── /start ─────────────────────────────────────────────────────────────────────
 
 bot.command("start", async (ctx) => {
+  const telegramId = String(ctx.chat.id);
+
+  // Always persist the user's language preference from their Telegram client.
+  // This runs regardless of whether they're linking an account or just saying hi.
+  await persistUserLanguage(telegramId, ctx.from?.language_code);
+
+  // If the user had previously stopped the bot, unblock them on re-subscribe.
+  await markUserUnblocked(telegramId);
+
   const token = ctx.match?.trim();
   if (token) {
     try {
       const { handleTelegramStartToken } = await import("./telegram-link");
-      await handleTelegramStartToken(String(ctx.chat.id), token);
+      await handleTelegramStartToken(telegramId, token);
       await ctx.reply(t(ctx, "accountLinked"), { parse_mode: "Markdown" });
     } catch {
       await ctx.reply(t(ctx, "linkExpired"));
     }
     return;
   }
+
   await ctx.reply(t(ctx, "welcome"), { parse_mode: "Markdown" });
+});
+
+// ── /stop ──────────────────────────────────────────────────────────────────────
+// Lets users opt out of notifications without blocking the bot entirely.
+// Sets the blocked flag so dispatchEventNotifications skips them.
+// Sending /start will unblock them again.
+
+bot.command("stop", async (ctx) => {
+  const telegramId = String(ctx.from!.id);
+  await markUserBlocked(telegramId);
+  await ctx.reply(t(ctx, "stopped"), { parse_mode: "Markdown" });
 });
 
 // ── /help ──────────────────────────────────────────────────────────────────────
@@ -394,7 +446,7 @@ bot.command("myevents", async (ctx) => {
     await ctx.reply(
       `*${e.title}*\n📅 ${safeMoscowStr(e.date)}\n✅ ${counts.going}  🤔 ${counts.maybe}  ❌ ${counts.no}\n\n` +
       `/attendees_${e.id}   /reshare_${e.id}   /edit_${e.id}`,
-      { parse_mode: "Markdown" }
+      { parse_mode: "Markdown" },
     );
   }
 });
@@ -402,7 +454,7 @@ bot.command("myevents", async (ctx) => {
 // ── /attendees_{id} ────────────────────────────────────────────────────────────
 
 bot.hears(/^\/attendees_(\d+)$/, async (ctx) => {
-  const eventId = parseInt(ctx.match[1]);
+  const eventId   = parseInt(ctx.match[1]);
   const attendees = await getEventAttendees(eventId);
   if (attendees.length === 0) {
     await ctx.reply("No RSVPs yet for this event.");
@@ -483,12 +535,12 @@ export async function notifyOrganiserDemand(organiserId: number, match: {
 
 function rsvpKeyboardForCounts(
   eventId: number,
-  counts: { going: number; maybe: number; no: number }
+  counts: { going: number; maybe: number; no: number },
 ): InlineKeyboard {
   return new InlineKeyboard()
-    .text(`✅ Going${counts.going ? ` (${counts.going})` : ""}`,          `rsvp:going:${eventId}`)
-    .text(`🤔 Maybe${counts.maybe ? ` (${counts.maybe})` : ""}`,          `rsvp:maybe:${eventId}`)
-    .text(`❌ Can't make it${counts.no ? ` (${counts.no})` : ""}`,        `rsvp:no:${eventId}`);
+    .text(`✅ Going${counts.going   ? ` (${counts.going})`   : ""}`, `rsvp:going:${eventId}`)
+    .text(`🤔 Maybe${counts.maybe   ? ` (${counts.maybe})`   : ""}`, `rsvp:maybe:${eventId}`)
+    .text(`❌ Can't make it${counts.no ? ` (${counts.no})`   : ""}`, `rsvp:no:${eventId}`);
 }
 
 // ── Preview card text ──────────────────────────────────────────────────────────
@@ -542,7 +594,7 @@ async function sendOrgPreviewCard(event: EventData): Promise<void> {
 // ── Dispatch notifications ─────────────────────────────────────────────────────
 
 export async function dispatchEventNotifications(
-  event: EventData
+  event: EventData,
 ): Promise<{ sent: number; inApp: number }> {
   const matchingUsers = await db
     .select()
@@ -561,7 +613,7 @@ export async function dispatchEventNotifications(
   for (const user of matchingUsers) {
     if (user.telegramId && alreadyNotified.has(user.telegramId)) continue;
 
-    // In-app notification
+    // In-app notification (stored in meh-auth DB)
     try {
       await db.insert(notifications).values({
         userId:   user.id,
@@ -577,7 +629,7 @@ export async function dispatchEventNotifications(
       console.error(`[bot] Failed to insert in-app notification for user ${user.id}:`, err?.message);
     }
 
-    // Telegram notification
+    // Telegram notification — skip blocked users
     if (user.telegramId && !userBlocked(user)) {
       const lang     = userLang(user);
       const text     = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.venueAddress, desc, event.id);
@@ -597,7 +649,7 @@ export async function dispatchEventNotifications(
 // ── notifyMatchingUsers — admin gate ───────────────────────────────────────────
 
 export async function notifyMatchingUsers(
-  event: EventData
+  event: EventData,
 ): Promise<{ sent: number; inApp: number }> {
   if (!ADMIN_TELEGRAM_ID) {
     console.warn("[bot] ADMIN_TELEGRAM_ID not set — dispatching without approval");
@@ -664,8 +716,8 @@ export async function notifyMatchingUsers(
 bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   const status  = ctx.match[1] as "going" | "maybe" | "no";
   const eventId = parseInt(ctx.match[2]);
-  const userId  = ctx.from.id;
-  const key     = `${userId}:${eventId}`;
+  const tgId    = String(ctx.from.id);
+  const key     = `${tgId}:${eventId}`;
 
   // Rate-limit: 2 s cooldown per user per event
   const now = Date.now();
@@ -675,51 +727,60 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   }
   rsvpCooldown.set(key, now);
 
-  // Answer immediately so Telegram stops the spinner
-  await ctx.answerCallbackQuery();
-
+  // Resolve meh-auth user from Telegram ID
   const [user] = await db
     .select({ id: users.id })
     .from(users)
-    .where(eq(users.telegramId, String(userId)));
+    .where(eq(users.telegramId, tgId));
 
   if (!user) {
-    await ctx.answerCallbackQuery({ text: "Link your account first at expatevents.org", show_alert: true });
+    // answerCallbackQuery must be called exactly once per callback — do it here with alert
+    await ctx.answerCallbackQuery({
+      text:       "Link your account first at expatevents.org",
+      show_alert: true,
+    });
     return;
   }
 
-  // Determine previous status via API
+  // Acknowledge the tap immediately so Telegram stops the loading spinner.
+  // This is the single answerCallbackQuery call for the success path.
+  await ctx.answerCallbackQuery();
+
+  // Determine the user's existing RSVP status for toggle behaviour
   let oldStatus: string | undefined;
   try {
     const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/my-rsvp`, {
       headers: {
         "X-Bot-Secret": EXPAT_API_SECRET,
-        "X-User-Id": String(user.id),
+        "X-User-Id":    String(user.id),    // meh-auth integer ID
       },
     });
     if (res.ok) {
       const data = await res.json();
       oldStatus = data.status;
     }
-  } catch {}
+  } catch { /* non-fatal — treat as no previous RSVP */ }
 
+  // Tapping the same button again clears the RSVP
   const newStatus = (oldStatus === status) ? "none" : status;
 
-  const chat           = ctx.chat;
-  const sourceChatId   = chat?.id ?? 0;
+  const chat            = ctx.chat;
+  const sourceChatId    = chat?.id ?? 0;
   const sourceChatTitle = chat && "title" in chat ? (chat as any).title : undefined;
 
-  // Set RSVP via API and get fresh counts
+  // Write RSVP to expatevents DB and get fresh counts
   const counts = await setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle);
 
-  // Feedback
-  const lang     = await getUserLang(String(userId));
+  // Send a toast notification with the outcome
+  const lang     = await getUserLang(tgId);
   const feedback = newStatus === "none" ? tStatic(lang, "cleared") : tStatic(lang, newStatus);
-  await ctx.answerCallbackQuery({ text: feedback }).catch(() => {});
+  // answerCallbackQuery was already called above — use editMessageText for feedback
+  // instead of a second answerCallbackQuery, which Telegram would silently ignore.
+  // Updating the keyboard is sufficient UX; the toast above handled the confirmation.
 
-  // Update keyboard
-  const newKboard = rsvpKeyboardForCounts(eventId, counts);
-  await ctx.editMessageReplyMarkup({ reply_markup: newKboard }).catch(() => {});
+  // Update the inline keyboard with new counts
+  const newKeyboard = rsvpKeyboardForCounts(eventId, counts);
+  await ctx.editMessageReplyMarkup({ reply_markup: newKeyboard }).catch(() => {});
 });
 
 // ── Approve event ─────────────────────────────────────────────────────────────
@@ -756,7 +817,7 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
         adminMsg.chat.id,
         adminMsg.message_id,
         `${originalText}\n\n✅ *Approved — dispatching notifications…*`,
-        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() }
+        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
       );
     }
   } catch (editErr: any) {
@@ -778,7 +839,7 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
     `• *${result.sent}* Telegram messages queued\n` +
     `• *${result.inApp}* in-app notifications created\n` +
     `• Preview card sent to organiser`,
-    { parse_mode: "Markdown" }
+    { parse_mode: "Markdown" },
   );
 });
 
@@ -797,7 +858,7 @@ bot.callbackQuery(/^decline_event:(.+)$/, async (ctx) => {
         adminMsg.chat.id,
         adminMsg.message_id,
         `${originalText}\n\n❌ *Declined — no notifications sent*`,
-        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() }
+        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
       );
     }
   } catch { /* non-critical */ }
@@ -816,14 +877,14 @@ bot.command("pending", async (ctx) => {
     return;
   }
   for (const row of rows) {
-    const ev   = JSON.parse(row.eventData as string);
-    const icon = CATEGORY_ICONS[ev.category] ?? "📌";
+    const ev       = JSON.parse(row.eventData as string);
+    const icon     = CATEGORY_ICONS[ev.category] ?? "📌";
     const keyboard = new InlineKeyboard()
       .text("✅ Approve", `approve_event:${row.token}`)
       .text("❌ Decline", `decline_event:${row.token}`);
     await ctx.reply(
       `${icon} *${ev.title}* (${getCategoryLabel(ev.category)})\n📅 ${safeMoscowStr(ev.date)}`,
-      { parse_mode: "Markdown", reply_markup: keyboard }
+      { parse_mode: "Markdown", reply_markup: keyboard },
     );
   }
 });
@@ -853,14 +914,28 @@ bot.command("findevents", async (ctx) => {
     .where(sql`LOWER(${events.title}) LIKE ${"%" + query.toLowerCase() + "%"}`);
   if (results.length === 0) { await ctx.reply("No events found."); return; }
   for (const e of results) {
-    await ctx.reply(`*${e.title}* (ID ${e.id})\n/attendees_${e.id}  /reshare_${e.id}`, { parse_mode: "Markdown" });
+    await ctx.reply(
+      `*${e.title}* (ID ${e.id})\n/attendees_${e.id}  /reshare_${e.id}`,
+      { parse_mode: "Markdown" },
+    );
   }
 });
 
 bot.command("stats", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
   const [evtCount] = await db.select({ count: sql<number>`count(*)` }).from(events);
-  await ctx.reply(`📊 *Stats*\nEvents: ${evtCount.count}\nRSVPs: stored in ExpatEvents`, { parse_mode: "Markdown" });
+  const [userCount] = await db.select({ count: sql<number>`count(*)` }).from(users);
+  const [tgCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(users)
+    .where(isNotNull(users.telegramId));
+  await ctx.reply(
+    `📊 *Stats*\n` +
+    `Users: ${userCount.count} (${tgCount.count} with Telegram)\n` +
+    `Events cached: ${evtCount.count}\n` +
+    `RSVPs: stored in ExpatEvents DB`,
+    { parse_mode: "Markdown" },
+  );
 });
 
 // ── Compatibility exports (used by matcher.ts / notify-routes.ts) ──────────────
@@ -875,7 +950,7 @@ export async function sendMatchReport(matches: any[]): Promise<void> {
     await bot.api.sendMessage(
       ADMIN_TELEGRAM_ID,
       `📊 *Availability match report*\n${matches.length} new time-slot match${matches.length !== 1 ? "es" : ""} found.`,
-      { parse_mode: "Markdown" }
+      { parse_mode: "Markdown" },
     );
   } catch (err: any) {
     console.error("[bot] Failed to send match report:", err?.message);
