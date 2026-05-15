@@ -13,7 +13,7 @@ import pg from "pg";
 import { hashPassword, comparePasswords, setupPassport, registerAuthRoutes } from "./auth";
 import { db } from "./db";
 import { users } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -600,6 +600,38 @@ app.get("/api/admin/users", async (req: any, res: any) => {
       createdAt:   users.createdAt,
     }).from(users);
     res.json(allUsers);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/admin/users/batch ───────────────────────────────────────────
+// Returns basic public fields for a list of user IDs.
+// Used by expatevents to enrich RSVP attendee lists.
+app.post("/api/admin/users/batch", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: "ids must be a non-empty array" });
+  }
+  if (ids.length > 500) {
+    return res.status(400).json({ error: "Maximum 500 ids per request" });
+  }
+
+  try {
+    const result = await db
+      .select({
+        id:          users.id,
+        username:    users.username,
+        displayName: users.displayName,
+        telegramId:  users.telegramId,
+        avatarUrl:   users.avatarUrl,
+      })
+      .from(users)
+      .where(inArray(users.id, ids.map(Number)));
+
+    res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
