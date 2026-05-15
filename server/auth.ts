@@ -110,7 +110,6 @@ export function setupPassport() {
         return done(null, user);
       } catch (err) { return done(err as Error); }
     }));
-     }
   }
 
 // ── Register all auth routes ───────────────────────────────────────────────
