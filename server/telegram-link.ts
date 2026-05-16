@@ -6,7 +6,7 @@ import { eq, and, isNull } from "drizzle-orm";
 
 export async function handleTelegramStartToken(chatId: string, token: string) {
   const [linkToken] = await db.select().from(telegramLinkTokens).where(
-    and(eq(telegramLinkTokens.token, token), isNull(telegramLinkTokens.used))
+   and(eq(telegramLinkTokens.token, token), eq(telegramLinkTokens.used, false))
   );
 
   if (!linkToken || linkToken.expiresAt < new Date()) {
