@@ -10,7 +10,7 @@ import { conversations, ConversationFlavor } from "@grammyjs/conversations";
 import { db } from "./db";
 import { users, pendingApprovals, events, notifications } from "@shared/schema";
 import { eq, and, isNotNull, sql } from "drizzle-orm";
-import { EVENT_CATEGORIES, getCategoryLabel } from "@shared/categories";
+import { getCategoryLabel } from "@shared/categories";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -39,7 +39,8 @@ const EXPAT_API_URL     = (process.env.EXPAT_API_URL ?? "https://expatevents.org
 const EXPAT_API_SECRET  = process.env.EXPAT_API_SECRET ?? "";
 const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID;
 
-// TODO: move CATEGORY_ICONS to shared/categories.ts to avoid duplication with auth.ts
+// Single source of truth — shared with auth.ts via this map.
+// TODO: move to shared/categories.ts to eliminate all duplication.
 const CATEGORY_ICONS: Record<string, string> = {
   networking: "🔗", tech: "💻", culture: "🎨", food: "🍔",
   sports: "⚽", music: "🎵", language: "🌍", outdoor: "🏕️",
@@ -48,6 +49,24 @@ const CATEGORY_ICONS: Record<string, string> = {
 };
 
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+// ── Fetch with timeout ─────────────────────────────────────────────────────────
+// Node's global fetch has no built-in timeout. Without this, a call to a
+// sleeping Render service hangs indefinitely and blocks the entire approval flow.
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 8000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ── Localisation ───────────────────────────────────────────────────────────────
 
@@ -144,43 +163,38 @@ async function getUserLang(telegramId: string): Promise<string> {
 async function persistUserLanguage(telegramId: string, languageCode: string | undefined): Promise<void> {
   const lang = languageCode?.startsWith("ru") ? "ru" : "en";
   try {
-    await db
-      .update(users)
-      .set({ language: lang })
-      .where(eq(users.telegramId, telegramId));
-  } catch {
-    // Non-fatal
-  }
+    await db.update(users).set({ language: lang }).where(eq(users.telegramId, telegramId));
+  } catch { /* non-fatal */ }
 }
 
 async function markUserBlocked(telegramId: string): Promise<void> {
   try {
-    await db
-      .update(users)
-      .set({ blocked: true } as any)
-      .where(eq(users.telegramId, telegramId));
+    await db.update(users).set({ blocked: true } as any).where(eq(users.telegramId, telegramId));
     console.log(`[bot] User ${telegramId} marked blocked`);
-  } catch {
-    // Column may not exist yet — not critical
-  }
+  } catch { /* column may not exist yet */ }
 }
 
 async function markUserUnblocked(telegramId: string): Promise<void> {
   try {
-    await db
-      .update(users)
-      .set({ blocked: false } as any)
-      .where(eq(users.telegramId, telegramId));
-  } catch {
-    // Non-fatal
-  }
+    await db.update(users).set({ blocked: false } as any).where(eq(users.telegramId, telegramId));
+  } catch { /* non-fatal */ }
 }
 
+// ── In-memory dedup ────────────────────────────────────────────────────────────
+// Tracks which telegramIds have already been notified for a given event ID
+// within this server session. Cleared on restart — acceptable because a restart
+// would only cause a harmless duplicate notification at worst.
+//
+// IMPORTANT: This map must be cleared for an event before re-dispatching
+// (e.g. after a failed attempt). See clearNotifiedForEvent().
 const notifiedForEvent = new Map<number, Set<string>>();
 
+function clearNotifiedForEvent(eventId: number): void {
+  notifiedForEvent.delete(eventId);
+  console.log(`[bot] Cleared in-memory dedup for event ${eventId}`);
+}
+
 // ── RSVP operations — all via ExpatEvents API ──────────────────────────────────
-// rsvps.userId in expatevents stores the meh-auth integer user ID.
-// No FK exists on that column (cross-database reference).
 
 interface RsvpCounts {
   going: number;
@@ -198,15 +212,17 @@ interface Attendee {
 
 async function loadRsvpCounts(eventId: number): Promise<RsvpCounts> {
   try {
-    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp-summary`, {
-      headers: { "X-Bot-Secret": EXPAT_API_SECRET },
-    });
+    const res = await fetchWithTimeout(
+      `${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp-summary`,
+      { headers: { "X-Bot-Secret": EXPAT_API_SECRET } },
+    );
     if (res.ok) {
       const data = await res.json();
       return { going: data.going ?? 0, maybe: data.maybe ?? 0, no: data.no ?? 0 };
     }
   } catch (err: any) {
-    console.error(`[bot] Failed to load RSVP counts for event ${eventId}:`, err?.message);
+    // Timeout or network error — return zeros rather than blocking
+    console.warn(`[bot] loadRsvpCounts for event ${eventId} failed (${err?.message}) — using 0`);
   }
   return { going: 0, maybe: 0, no: 0 };
 }
@@ -219,19 +235,17 @@ async function setRsvpStatus(
   sourceChatTitle?: string,
 ): Promise<RsvpCounts> {
   try {
-    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Bot-Secret": EXPAT_API_SECRET,
+    const res = await fetchWithTimeout(
+      `${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Bot-Secret": EXPAT_API_SECRET,
+        },
+        body: JSON.stringify({ userId: mehAuthUserId, status, sourceChatId, sourceChatTitle }),
       },
-      body: JSON.stringify({
-        userId: mehAuthUserId,
-        status,
-        sourceChatId,
-        sourceChatTitle,
-      }),
-    });
+    );
     if (res.ok) {
       const data = await res.json();
       return {
@@ -241,21 +255,20 @@ async function setRsvpStatus(
       };
     }
   } catch (err: any) {
-    console.error(`[bot] RSVP API call failed:`, err?.message);
+    console.error(`[bot] setRsvpStatus failed:`, err?.message);
   }
   return { going: 0, maybe: 0, no: 0 };
 }
 
 async function getEventAttendees(eventId: number): Promise<Attendee[]> {
   try {
-    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/attendees`, {
-      headers: { "X-Bot-Secret": EXPAT_API_SECRET },
-    });
-    if (res.ok) {
-      return await res.json();
-    }
+    const res = await fetchWithTimeout(
+      `${EXPAT_API_URL}/api/bot/events/${eventId}/attendees`,
+      { headers: { "X-Bot-Secret": EXPAT_API_SECRET } },
+    );
+    if (res.ok) return await res.json();
   } catch (err: any) {
-    console.error(`[bot] Failed to fetch attendees for event ${eventId}:`, err?.message);
+    console.error(`[bot] getEventAttendees failed:`, err?.message);
   }
   return [];
 }
@@ -275,20 +288,17 @@ async function storePendingApproval(event: EventData): Promise<string> {
 }
 
 async function getPendingApproval(token: string): Promise<EventData | null> {
-  // Use a JS-side expiry check instead of a SQL expression to avoid
-  // any timezone/dialect issues with NOW() across DB providers.
   const [row] = await db
     .select()
     .from(pendingApprovals)
     .where(eq(pendingApprovals.token, token));
 
   if (!row) {
-    console.log(`[bot] getPendingApproval: no row found for token ${token}`);
+    console.log(`[bot] getPendingApproval: no row for token "${token}"`);
     return null;
   }
-
   if (new Date(row.expiresAt) < new Date()) {
-    console.log(`[bot] getPendingApproval: token ${token} has expired`);
+    console.log(`[bot] getPendingApproval: token "${token}" expired`);
     return null;
   }
 
@@ -300,35 +310,42 @@ async function deletePendingApproval(token: string): Promise<void> {
 }
 
 // ── Event cache ────────────────────────────────────────────────────────────────
+// Saves a local copy of the event in the meh-auth DB for /myevents, /reshare etc.
+// This is best-effort — a failure here must never block notification dispatch.
 
 async function saveEvent(event: EventData): Promise<void> {
-  await db
-    .insert(events)
-    .values({
-      id:           event.id,
-      title:        event.title,
-      category:     event.category,
-      date:         event.date,
-      venueCity:    event.venueCity,
-      venueAddress: event.venueAddress,
-      description:  event.description,
-      organizerId:  event.organizerId ? parseInt(event.organizerId) : null,
-      imageUrl:     event.imageUrl ?? null,
-      dispatched:   true,
-      createdAt:    new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [events.id],
-      set: {
+  try {
+    await db
+      .insert(events)
+      .values({
+        id:           event.id,
         title:        event.title,
         category:     event.category,
         date:         event.date,
         venueCity:    event.venueCity,
         venueAddress: event.venueAddress,
         description:  event.description,
+        organizerId:  event.organizerId ? parseInt(event.organizerId) : null,
         imageUrl:     event.imageUrl ?? null,
-      },
-    });
+        dispatched:   true,
+        createdAt:    new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [events.id],
+        set: {
+          title:        event.title,
+          category:     event.category,
+          date:         event.date,
+          venueCity:    event.venueCity,
+          venueAddress: event.venueAddress,
+          description:  event.description,
+          imageUrl:     event.imageUrl ?? null,
+        },
+      });
+  } catch (err: any) {
+    // Non-fatal — log and continue. Notifications must still go out.
+    console.error(`[bot] saveEvent failed for event ${event.id}:`, err?.message);
+  }
 }
 
 // ── Notification queue ─────────────────────────────────────────────────────────
@@ -361,9 +378,13 @@ async function processQueue(): Promise<void> {
           reply_markup: item.keyboard,
         });
       }
+      console.log(`[bot] Delivered notification to ${item.telegramId}`);
     } catch (err: any) {
-      if (err?.error_code === 403) await markUserBlocked(item.telegramId);
-      else console.error(`[bot] Failed to deliver to ${item.telegramId}:`, err?.message);
+      if (err?.error_code === 403) {
+        await markUserBlocked(item.telegramId);
+      } else {
+        console.error(`[bot] Failed to deliver to ${item.telegramId}:`, err?.message);
+      }
     }
     await new Promise(r => setTimeout(r, 50));
   }
@@ -372,7 +393,10 @@ async function processQueue(): Promise<void> {
 
 function enqueueNotification(n: typeof notificationQueue[number]): void {
   notificationQueue.push(n);
-  processQueue();
+  // Kick off processing without awaiting — fire and forget
+  processQueue().catch(err =>
+    console.error("[bot] processQueue threw unexpectedly:", err?.message)
+  );
 }
 
 // ── Bot instance ───────────────────────────────────────────────────────────────
@@ -401,7 +425,6 @@ bot.command("start", async (ctx) => {
     }
     return;
   }
-
   await ctx.reply(t(ctx, "welcome"), { parse_mode: "Markdown" });
 });
 
@@ -482,20 +505,13 @@ bot.hears(/^\/edit_(\d+)$/, async (ctx) => {
 bot.hears(/^\/reshare_(\d+)$/, async (ctx) => {
   const eventId = parseInt(ctx.match[1]);
   const [event] = await db.select().from(events).where(eq(events.id, eventId));
-  if (!event) {
-    await ctx.reply("Event not found.");
-    return;
-  }
+  if (!event) { await ctx.reply("Event not found."); return; }
   const cardText = buildPreviewCardText(event as unknown as EventData);
   const counts   = await loadRsvpCounts(eventId);
   const keyboard = rsvpKeyboardForCounts(eventId, counts);
   try {
     if (event.imageUrl) {
-      await ctx.replyWithPhoto(event.imageUrl, {
-        caption:      cardText,
-        parse_mode:   "Markdown",
-        reply_markup: keyboard,
-      });
+      await ctx.replyWithPhoto(event.imageUrl, { caption: cardText, parse_mode: "Markdown", reply_markup: keyboard });
     } else {
       await ctx.reply(cardText, { parse_mode: "Markdown", reply_markup: keyboard });
     }
@@ -507,10 +523,7 @@ bot.hears(/^\/reshare_(\d+)$/, async (ctx) => {
 // ── Demand signal ──────────────────────────────────────────────────────────────
 
 export async function notifyOrganiserDemand(organiserId: number, match: {
-  category: string;
-  day: number;
-  hour: number;
-  userCount: number;
+  category: string; day: number; hour: number; userCount: number;
 }): Promise<void> {
   const [organiser] = await db.select().from(users).where(eq(users.id, organiserId));
   if (!organiser?.telegramId) return;
@@ -522,10 +535,7 @@ export async function notifyOrganiserDemand(organiserId: number, match: {
   const keyboard  = new InlineKeyboard().url("✨ Create event", createUrl);
 
   try {
-    await bot.api.sendMessage(organiser.telegramId, `${icon} ${text}`, {
-      parse_mode:   "Markdown",
-      reply_markup: keyboard,
-    });
+    await bot.api.sendMessage(organiser.telegramId, `${icon} ${text}`, { parse_mode: "Markdown", reply_markup: keyboard });
   } catch (err: any) {
     if (err?.error_code === 403) await markUserBlocked(organiser.telegramId);
   }
@@ -538,9 +548,9 @@ function rsvpKeyboardForCounts(
   counts: { going: number; maybe: number; no: number },
 ): InlineKeyboard {
   return new InlineKeyboard()
-    .text(`✅ Going${counts.going ? ` (${counts.going})` : ""}`,        `rsvp:going:${eventId}`)
-    .text(`🤔 Maybe${counts.maybe ? ` (${counts.maybe})` : ""}`,        `rsvp:maybe:${eventId}`)
-    .text(`❌ Can't make it${counts.no ? ` (${counts.no})` : ""}`,      `rsvp:no:${eventId}`);
+    .text(`✅ Going${counts.going ? ` (${counts.going})` : ""}`,   `rsvp:going:${eventId}`)
+    .text(`🤔 Maybe${counts.maybe ? ` (${counts.maybe})` : ""}`,   `rsvp:maybe:${eventId}`)
+    .text(`❌ Can't${counts.no   ? ` (${counts.no})`   : ""}`,     `rsvp:no:${eventId}`);
 }
 
 // ── Preview card text ──────────────────────────────────────────────────────────
@@ -572,58 +582,80 @@ async function sendOrgPreviewCard(event: EventData): Promise<void> {
 
   try {
     await bot.api.sendMessage(event.organizerTelegramId, intro, { parse_mode: "Markdown" });
-
     if (event.imageUrl) {
       await bot.api.sendPhoto(event.organizerTelegramId, event.imageUrl, {
-        caption:      cardText,
-        parse_mode:   "Markdown",
-        reply_markup: keyboard,
+        caption: cardText, parse_mode: "Markdown", reply_markup: keyboard,
       });
     } else {
       await bot.api.sendMessage(event.organizerTelegramId, cardText, {
-        parse_mode:   "Markdown",
-        reply_markup: keyboard,
+        parse_mode: "Markdown", reply_markup: keyboard,
       });
     }
   } catch (err: any) {
     if (err?.error_code === 403) await markUserBlocked(event.organizerTelegramId);
-    else console.error(`[bot] Failed to send preview card to organiser:`, err?.message);
+    else console.error(`[bot] sendOrgPreviewCard failed:`, err?.message);
   }
 }
 
 // ── Dispatch notifications ─────────────────────────────────────────────────────
-// Fetches RSVP counts ONCE before the loop rather than once per user,
-// eliminating the N serial HTTP calls that previously caused hangs on large
-// user lists.
+// Separated into two distinct phases so a failure in saveEvent (DB cache) can
+// never prevent Telegram messages from going out.
+//
+// Phase 1 — in-app notifications + Telegram queue (must complete fully)
+// Phase 2 — saveEvent to local cache (best-effort, errors logged not thrown)
 
 export async function dispatchEventNotifications(
   event: EventData,
 ): Promise<{ sent: number; inApp: number }> {
-  console.log(`[bot] dispatchEventNotifications START — event ${event.id} "${event.title}"`);
+  console.log(`[bot] dispatchEventNotifications START — event ${event.id} "${event.title}" category="${event.category}"`);
 
-  const matchingUsers = await db
-    .select()
-    .from(users)
-    .where(sql`${event.category} = ANY(${users.interests})`);
+  // ── Find matching users ──────────────────────────────────────────────────
+  let matchingUsers: any[] = [];
+  try {
+    matchingUsers = await db
+      .select()
+      .from(users)
+      .where(sql`${event.category} = ANY(${users.interests})`);
+  } catch (err: any) {
+    console.error(`[bot] dispatchEventNotifications: DB query failed:`, err?.message);
+    throw err; // re-throw so the caller knows dispatch failed
+  }
 
-  console.log(`[bot] dispatchEventNotifications — ${matchingUsers.length} matching user(s)`);
+  console.log(`[bot] dispatchEventNotifications — ${matchingUsers.length} user(s) match category "${event.category}"`);
 
-  if (!notifiedForEvent.has(event.id)) notifiedForEvent.set(event.id, new Set());
+  if (matchingUsers.length === 0) {
+    console.log(`[bot] dispatchEventNotifications — no matching users, saving event cache and returning`);
+    await saveEvent(event); // best-effort cache
+    return { sent: 0, inApp: 0 };
+  }
+
+  // ── Dedup: ensure the set exists for this event ─────────────────────────
+  // NOTE: The set is NOT pre-populated from the DB. If the server was
+  // restarted between a failed attempt and a re-approval, the set is empty
+  // and all users will be notified again. This is intentional — a restart
+  // clears the in-memory dedup so re-approvals work correctly.
+  if (!notifiedForEvent.has(event.id)) {
+    notifiedForEvent.set(event.id, new Set());
+  }
   const alreadyNotified = notifiedForEvent.get(event.id)!;
 
   const icon    = CATEGORY_ICONS[event.category] ?? "📌";
   const dateStr = safeMoscowStr(event.date);
   const desc    = (event.description ?? "").slice(0, 200);
 
-  // Fetch RSVP counts once for the keyboard — not once per user
+  // ── Fetch RSVP counts ONCE for the keyboard (not per user) ─────────────
+  // Uses fetchWithTimeout — if expatevents is sleeping this returns {0,0,0}
+  // and does not block the entire notification loop.
   const counts = await loadRsvpCounts(event.id);
+  console.log(`[bot] dispatchEventNotifications — RSVP counts: going=${counts.going} maybe=${counts.maybe} no=${counts.no}`);
 
-  let sent = 0, inApp = 0;
+  let sent = 0;
+  let inApp = 0;
 
+  // ── Phase 1: notify each user ────────────────────────────────────────────
   for (const user of matchingUsers) {
-    if (user.telegramId && alreadyNotified.has(user.telegramId)) continue;
 
-    // In-app notification (stored in meh-auth DB)
+    // ── In-app notification (always attempted, even without telegramId) ────
     try {
       await db.insert(notifications).values({
         userId:   user.id,
@@ -636,21 +668,36 @@ export async function dispatchEventNotifications(
       });
       inApp++;
     } catch (err: any) {
-      console.error(`[bot] Failed to insert in-app notification for user ${user.id}:`, err?.message);
+      // Duplicate key = already notified — safe to ignore
+      if (!err?.message?.includes("duplicate") && !err?.message?.includes("unique")) {
+        console.error(`[bot] in-app notification failed for user ${user.id}:`, err?.message);
+      }
     }
 
-    // Telegram notification — skip blocked users
-    if (user.telegramId && !userBlocked(user)) {
-      const lang     = userLang(user);
-      const text     = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.venueAddress, desc, event.id);
-      const keyboard = rsvpKeyboardForCounts(event.id, counts);
-      enqueueNotification({ userId: user.id, telegramId: user.telegramId, text, imageUrl: event.imageUrl, keyboard, lang });
-      alreadyNotified.add(user.telegramId);
-      sent++;
+    // ── Telegram notification ──────────────────────────────────────────────
+    if (!user.telegramId) continue;
+    if (userBlocked(user)) {
+      console.log(`[bot] Skipping blocked user ${user.id} (${user.telegramId})`);
+      continue;
     }
+    if (alreadyNotified.has(user.telegramId)) {
+      console.log(`[bot] Skipping already-notified ${user.telegramId}`);
+      continue;
+    }
+
+    const lang     = userLang(user);
+    const text     = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.venueAddress, desc, event.id);
+    const keyboard = rsvpKeyboardForCounts(event.id, counts);
+
+    enqueueNotification({ userId: user.id, telegramId: user.telegramId, text, imageUrl: event.imageUrl, keyboard, lang });
+    alreadyNotified.add(user.telegramId);
+    sent++;
+    console.log(`[bot] Queued notification for user ${user.id} (${user.telegramId})`);
   }
 
+  // ── Phase 2: cache the event (best-effort, non-blocking) ─────────────────
   await saveEvent(event);
+
   console.log(`[bot] dispatchEventNotifications DONE — event ${event.id}: ${inApp} in-app, ${sent} Telegram queued`);
   return { sent, inApp };
 }
@@ -702,10 +749,7 @@ export async function notifyMatchingUsers(
     .text("❌ Decline", `decline_event:${token}`);
 
   try {
-    await bot.api.sendMessage(ADMIN_TELEGRAM_ID, adminText, {
-      parse_mode:   "Markdown",
-      reply_markup: keyboard,
-    });
+    await bot.api.sendMessage(ADMIN_TELEGRAM_ID, adminText, { parse_mode: "Markdown", reply_markup: keyboard });
     console.log(`[bot] Event ${event.id} awaiting admin approval (token: ${token})`);
   } catch (err: any) {
     console.error("[bot] Failed to message admin, dispatching immediately:", err?.message);
@@ -718,9 +762,7 @@ export async function notifyMatchingUsers(
   return { sent: 0, inApp: 0 };
 }
 
-// ── Callback handlers ──────────────────────────────────────────────────────────
-
-// ── RSVP ──────────────────────────────────────────────────────────────────────
+// ── Callback: RSVP ────────────────────────────────────────────────────────────
 
 bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   const status  = ctx.match[1] as "going" | "maybe" | "no";
@@ -735,16 +777,9 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   }
   rsvpCooldown.set(key, now);
 
-  const [user] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.telegramId, tgId));
-
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.telegramId, tgId));
   if (!user) {
-    await ctx.answerCallbackQuery({
-      text:       "Link your account first at expatevents.org",
-      show_alert: true,
-    });
+    await ctx.answerCallbackQuery({ text: "Link your account first at expatevents.org", show_alert: true });
     return;
   }
 
@@ -752,35 +787,28 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
 
   let oldStatus: string | undefined;
   try {
-    const res = await fetch(`${EXPAT_API_URL}/api/bot/events/${eventId}/my-rsvp`, {
-      headers: {
-        "X-Bot-Secret": EXPAT_API_SECRET,
-        "X-User-Id":    String(user.id),
-      },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      oldStatus = data.status;
-    }
+    const res = await fetchWithTimeout(
+      `${EXPAT_API_URL}/api/bot/events/${eventId}/my-rsvp`,
+      { headers: { "X-Bot-Secret": EXPAT_API_SECRET, "X-User-Id": String(user.id) } },
+    );
+    if (res.ok) oldStatus = (await res.json()).status;
   } catch { /* non-fatal */ }
 
-  const newStatus = (oldStatus === status) ? "none" : status;
-
-  const chat            = ctx.chat;
+  const newStatus   = (oldStatus === status) ? "none" : status;
+  const chat        = ctx.chat;
   const sourceChatId    = chat?.id ?? 0;
   const sourceChatTitle = chat && "title" in chat ? (chat as any).title : undefined;
 
   const counts = await setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle);
-
-  const newKeyboard = rsvpKeyboardForCounts(eventId, counts);
-  await ctx.editMessageReplyMarkup({ reply_markup: newKeyboard }).catch(() => {});
+  await ctx.editMessageReplyMarkup({ reply_markup: rsvpKeyboardForCounts(eventId, counts) }).catch(() => {});
 });
 
-// ── Approve event ─────────────────────────────────────────────────────────────
+// ── Callback: Approve event ───────────────────────────────────────────────────
+
 bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
   const token = ctx.match[1];
 
-  // 1. Acknowledge the button tap immediately
+  // 1. Acknowledge immediately — Telegram requires this within 10 s
   await ctx.answerCallbackQuery({ text: "Approving…" }).catch(() => {});
 
   // 2. Load the pending event
@@ -788,7 +816,7 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
   try {
     event = await getPendingApproval(token);
   } catch (err: any) {
-    console.error("[bot] approve_event: DB error loading approval:", err?.message);
+    console.error("[bot] approve_event: DB error:", err?.message);
     await ctx.reply("❌ Database error loading approval. Check server logs.");
     return;
   }
@@ -796,115 +824,100 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
   if (!event) {
     console.warn(`[bot] approve_event: token "${token}" not found or expired`);
     await ctx.reply("⚠️ This approval has expired or was already processed.");
-    // Remove the inline keyboard so it can’t be tapped again
-    try {
-      await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
-    } catch { /* ignore */ }
+    await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() }).catch(() => {});
     return;
   }
 
-  console.log(`[bot] approve_event: approving event ${event.id} "${event.title}"`);
+  console.log(`[bot] approve_event: processing event ${event.id} "${event.title}"`);
 
-  // 3. Delete the token immediately (idempotency)
+  // 3. Delete token immediately to prevent double-dispatch on re-tap
   await deletePendingApproval(token).catch((err: any) =>
-    console.warn("[bot] approve_event: could not delete approval token:", err?.message)
+    console.warn("[bot] approve_event: could not delete token:", err?.message)
   );
 
-  // 4. Edit the admin message to show progress (best-effort)
+  // 4. Clear any stale in-memory dedup for this event so re-approvals work
+  clearNotifiedForEvent(event.id);
+
+  // 5. Edit admin message to show progress
   const adminMsg = ctx.callbackQuery.message;
+  const originalText = (adminMsg && "text" in adminMsg) ? (adminMsg as any).text as string : "";
   if (adminMsg && "text" in adminMsg) {
-    try {
-      await ctx.api.editMessageText(
-        adminMsg.chat.id,
-        adminMsg.message_id,
-        `${(adminMsg as any).text}\n\n⏳ Dispatching notifications…`,
-        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() }
-      );
-    } catch (editErr: any) {
-      console.warn("[bot] approve_event: could not edit admin message:", editErr?.message);
-    }
+    await ctx.api.editMessageText(
+      adminMsg.chat.id, adminMsg.message_id,
+      `${originalText}\n\n⏳ Dispatching notifications…`,
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
+    ).catch((err: any) => console.warn("[bot] approve_event: could not edit admin message:", err?.message));
   }
 
-  // 5. Dispatch notifications
+  // 6. Dispatch — this is the critical step
   let result = { sent: 0, inApp: 0 };
   try {
     result = await dispatchEventNotifications(event);
-  } catch (dispatchErr: any) {
-    console.error("[bot] approve_event: dispatchEventNotifications threw:", dispatchErr?.message);
-    await ctx.reply(
-      `❌ Dispatch failed for "${event.title}": ${dispatchErr?.message ?? "unknown error"}\n\nCheck server logs.`
-    );
+  } catch (err: any) {
+    console.error("[bot] approve_event: dispatchEventNotifications threw:", err?.message);
+    await ctx.reply(`❌ Dispatch failed: ${err?.message ?? "unknown error"}\n\nCheck server logs.`);
     return;
   }
 
-  // 6. Send organiser preview card (non-critical)
+  // 7. Send organiser card (non-critical)
   try {
     await sendOrgPreviewCard(event);
-  } catch (cardErr: any) {
-    console.warn("[bot] approve_event: sendOrgPreviewCard failed:", cardErr?.message);
+  } catch (err: any) {
+    console.warn("[bot] approve_event: sendOrgPreviewCard failed:", err?.message);
   }
 
-  // 7. Final success message
-  const summary = `📬 *Notifications sent for "${event.title}"*\n\n` +
-    `• *${result.sent}* Telegram messages queued\n` +
-    `• *${result.inApp}* in-app notifications created`;
-
-  // Try to update the original admin message, otherwise reply
+  // 8. Update admin message with result
+  const summary = `✅ *Done — ${result.sent} Telegram, ${result.inApp} in-app*`;
   if (adminMsg && "text" in adminMsg) {
-    try {
-      await ctx.api.editMessageText(
-        adminMsg.chat.id,
-        adminMsg.message_id,
-        `${(adminMsg as any).text.replace("\n\n⏳ Dispatching notifications…", "")}\n\n✅ *Done — ${result.sent} Telegram, ${result.inApp} in-app*`,
-        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() }
+    await ctx.api.editMessageText(
+      adminMsg.chat.id, adminMsg.message_id,
+      `${originalText}\n\n${summary}`,
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
+    ).catch(async () => {
+      // If editing fails, send a new message
+      await ctx.reply(
+        `📬 *Notifications sent for "${event!.title}"*\n\n• *${result.sent}* Telegram\n• *${result.inApp}* in-app`,
+        { parse_mode: "Markdown" },
       );
-      return;
-    } catch { /* fall through to reply */ }
+    });
+  } else {
+    await ctx.reply(
+      `📬 *Notifications sent for "${event.title}"*\n\n• *${result.sent}* Telegram\n• *${result.inApp}* in-app`,
+      { parse_mode: "Markdown" },
+    );
   }
-
-  await ctx.reply(summary, { parse_mode: "Markdown" });
 });
 
-// ── Decline event ─────────────────────────────────────────────────────────────
+// ── Callback: Decline event ───────────────────────────────────────────────────
 
 bot.callbackQuery(/^decline_event:(.+)$/, async (ctx) => {
   const token = ctx.match[1];
   await ctx.answerCallbackQuery({ text: "Declined." });
   await deletePendingApproval(token).catch(() => {});
-
-  try {
-    const adminMsg = ctx.callbackQuery.message;
-    if (adminMsg && "text" in adminMsg) {
-      await ctx.api.editMessageText(
-        adminMsg.chat.id,
-        adminMsg.message_id,
-        `${adminMsg.text}\n\n❌ *Declined — no notifications sent*`,
-        { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
-      );
-    }
-  } catch { /* non-critical */ }
+  const adminMsg = ctx.callbackQuery.message;
+  if (adminMsg && "text" in adminMsg) {
+    await ctx.api.editMessageText(
+      adminMsg.chat.id, adminMsg.message_id,
+      `${(adminMsg as any).text}\n\n❌ *Declined — no notifications sent*`,
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
+    ).catch(() => {});
+  }
 });
 
 // ── Admin commands ─────────────────────────────────────────────────────────────
 
 bot.command("pending", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
-  const rows = await db
-    .select()
-    .from(pendingApprovals)
+  const rows = await db.select().from(pendingApprovals)
     .where(sql`${pendingApprovals.expiresAt} > NOW()`);
-  if (rows.length === 0) {
-    await ctx.reply("No pending approvals.");
-    return;
-  }
+  if (rows.length === 0) { await ctx.reply("No pending approvals."); return; }
   for (const row of rows) {
-    const ev       = JSON.parse(row.eventData as string);
-    const icon     = CATEGORY_ICONS[ev.category] ?? "📌";
+    const ev = JSON.parse(row.eventData as string);
     const keyboard = new InlineKeyboard()
       .text("✅ Approve", `approve_event:${row.token}`)
       .text("❌ Decline", `decline_event:${row.token}`);
     await ctx.reply(
-      `${icon} *${ev.title}* (${getCategoryLabel(ev.category)})\n📅 ${safeMoscowStr(ev.date)}`,
+      `${CATEGORY_ICONS[ev.category] ?? "📌"} *${ev.title}* (${getCategoryLabel(ev.category)})\n📅 ${safeMoscowStr(ev.date)}`,
       { parse_mode: "Markdown", reply_markup: keyboard },
     );
   }
@@ -912,12 +925,11 @@ bot.command("pending", async (ctx) => {
 
 bot.command("approve_all", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
-  const rows = await db
-    .select()
-    .from(pendingApprovals)
+  const rows = await db.select().from(pendingApprovals)
     .where(sql`${pendingApprovals.expiresAt} > NOW()`);
   for (const row of rows) {
     const ev = JSON.parse(row.eventData as string);
+    clearNotifiedForEvent(ev.id);
     await dispatchEventNotifications(ev);
     await sendOrgPreviewCard(ev);
     await db.delete(pendingApprovals).where(eq(pendingApprovals.token, row.token));
@@ -925,20 +937,77 @@ bot.command("approve_all", async (ctx) => {
   await ctx.reply(`✅ Approved and dispatched ${rows.length} event${rows.length !== 1 ? "s" : ""}.`);
 });
 
+// ── /testnotify — sends a test message directly to the admin ──────────────────
+// Use this to verify the full pipeline without publishing a real event.
+// Usage: /testnotify
+// The bot will send you a sample event card with RSVP buttons.
+
+bot.command("testnotify", async (ctx) => {
+  if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
+
+  const tgId = String(ctx.from!.id);
+  const testEvent: EventData = {
+    id:          999999,
+    title:       "🧪 Test Event — Pipeline Check",
+    category:    "social",
+    date:        new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), // 2 days from now
+    venueCity:   "Moscow",
+    venueAddress: "Test Venue, 1 Test Street",
+    description: "This is a test notification to verify the dispatch pipeline is working end-to-end.",
+    organizerTelegramId: tgId,
+  };
+
+  await ctx.reply("🧪 Sending test notification directly to you…");
+
+  const counts   = await loadRsvpCounts(testEvent.id);
+  const keyboard = rsvpKeyboardForCounts(testEvent.id, counts);
+  const text     = buildPreviewCardText(testEvent);
+
+  try {
+    await bot.api.sendMessage(tgId, text, { parse_mode: "Markdown", reply_markup: keyboard });
+    await ctx.reply("✅ Test message delivered. If you see the card above, the pipeline works.");
+  } catch (err: any) {
+    await ctx.reply(`❌ Test failed: ${err?.message}`);
+  }
+});
+
+// ── /testdispatch — runs dispatchEventNotifications for a real event ──────────
+// Usage: /testdispatch <eventId>
+// Clears the dedup set first so all matching users are notified even if they
+// were notified before. Use on a test event only.
+
+bot.command("testdispatch", async (ctx) => {
+  if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
+  const idStr = ctx.match?.trim();
+  if (!idStr || isNaN(parseInt(idStr))) {
+    await ctx.reply("Usage: /testdispatch <eventId>");
+    return;
+  }
+  const eventId = parseInt(idStr);
+  const [cached] = await db.select().from(events).where(eq(events.id, eventId));
+  if (!cached) {
+    await ctx.reply(`Event ${eventId} not found in local cache. It must have been dispatched at least once.`);
+    return;
+  }
+  await ctx.reply(`⏳ Running dispatch for event ${eventId} "${cached.title}"…\nDedup cleared — all matching users will be notified.`);
+  clearNotifiedForEvent(eventId);
+  try {
+    const result = await dispatchEventNotifications(cached as unknown as EventData);
+    await ctx.reply(`✅ Done: ${result.sent} Telegram, ${result.inApp} in-app`);
+  } catch (err: any) {
+    await ctx.reply(`❌ Dispatch failed: ${err?.message}`);
+  }
+});
+
 bot.command("findevents", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
   const query = ctx.match?.trim() ?? "";
   if (!query) { await ctx.reply("Usage: /findevents <title>"); return; }
-  const results = await db
-    .select()
-    .from(events)
+  const results = await db.select().from(events)
     .where(sql`LOWER(${events.title}) LIKE ${"%" + query.toLowerCase() + "%"}`);
   if (results.length === 0) { await ctx.reply("No events found."); return; }
   for (const e of results) {
-    await ctx.reply(
-      `*${e.title}* (ID ${e.id})\n/attendees_${e.id}  /reshare_${e.id}`,
-      { parse_mode: "Markdown" },
-    );
+    await ctx.reply(`*${e.title}* (ID ${e.id})\n/attendees_${e.id}  /reshare_${e.id}  /testdispatch ${e.id}`, { parse_mode: "Markdown" });
   }
 });
 
@@ -946,14 +1015,16 @@ bot.command("stats", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
   const [evtCount]  = await db.select({ count: sql<number>`count(*)` }).from(events);
   const [userCount] = await db.select({ count: sql<number>`count(*)` }).from(users);
-  const [tgCount]   = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(users)
-    .where(isNotNull(users.telegramId));
+  const [tgCount]   = await db.select({ count: sql<number>`count(*)` }).from(users).where(isNotNull(users.telegramId));
+  const [intCount]  = await db.select({ count: sql<number>`count(*)` }).from(users)
+    .where(sql`array_length(${users.interests}, 1) > 0`);
   await ctx.reply(
     `📊 *Stats*\n` +
-    `Users: ${userCount.count} (${tgCount.count} with Telegram)\n` +
+    `Users total: ${userCount.count}\n` +
+    `With Telegram: ${tgCount.count}\n` +
+    `With interests set: ${intCount.count}\n` +
     `Events cached: ${evtCount.count}\n` +
+    `Queue depth: ${notificationQueue.length}\n` +
     `RSVPs: stored in ExpatEvents DB`,
     { parse_mode: "Markdown" },
   );
@@ -962,7 +1033,7 @@ bot.command("stats", async (ctx) => {
 // ── Compatibility exports ──────────────────────────────────────────────────────
 
 export async function notifyAdminAvailabilityMatch(_match: any): Promise<void> {
-  // Individual-match notifications suppressed — batched report handles this.
+  // Suppressed — batched report handles this.
 }
 
 export async function sendMatchReport(matches: any[]): Promise<void> {
@@ -974,7 +1045,7 @@ export async function sendMatchReport(matches: any[]): Promise<void> {
       { parse_mode: "Markdown" },
     );
   } catch (err: any) {
-    console.error("[bot] Failed to send match report:", err?.message);
+    console.error("[bot] sendMatchReport failed:", err?.message);
   }
 }
 
@@ -983,12 +1054,12 @@ export async function sendToUser(telegramId: string, text: string): Promise<bool
     await bot.api.sendMessage(telegramId, text, { parse_mode: "Markdown" });
     return true;
   } catch (err: any) {
-    console.error(`[bot] Failed to send to ${telegramId}:`, err?.message);
+    console.error(`[bot] sendToUser ${telegramId} failed:`, err?.message);
     return false;
   }
 }
 
-// ── Start (webhook or polling) ─────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────────────────────
 
 async function startBot(): Promise<void> {
   if (!process.env.TELEGRAM_BOT_TOKEN) {
@@ -1003,3 +1074,5 @@ async function startBot(): Promise<void> {
     bot.start({ onStart: info => console.log(`[bot] @${info.username} polling`) });
   }
 }
+
+startBot();
