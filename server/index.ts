@@ -195,17 +195,20 @@ app.get("/privacy", (_req, res) => {
 // ── Login page ─────────────────────────────────────────────────────────────
 app.get("/login", (req, res) => {
   const returnTo = encodeURIComponent((req.query.returnTo as string) ?? "/");
-  const authUrl = process.env.AUTH_SERVICE_URL ?? "";
-  const tgBotName = process.env.TELEGRAM_BOT_NAME ?? "";
-  const hasTelegram = !!tgBotName;
 
-  // Build the Telegram widget script OUTSIDE the template literal to avoid nesting issues
+  // JSON.stringify produces a properly quoted JS string literal, preventing
+  // injection if AUTH_SERVICE_URL ever contains quotes or special characters.
+  const safeAuthUrl  = JSON.stringify(process.env.AUTH_SERVICE_URL ?? "");
+  const tgBotName    = process.env.TELEGRAM_BOT_NAME ?? "";
+  const hasTelegram  = !!tgBotName;
+  const safeBotName  = JSON.stringify(tgBotName);
+
   const telegramWidgetScript = hasTelegram
     ? `
 (function() {
-  const s = document.createElement("script");
+  var s = document.createElement("script");
   s.src = "https://telegram.org/js/telegram-widget.js?22";
-  s.setAttribute("data-telegram-login", "${tgBotName}");
+  s.setAttribute("data-telegram-login", ${safeBotName});
   s.setAttribute("data-size", "large");
   s.setAttribute("data-auth-url", authUrl + "/api/auth/telegram");
   s.setAttribute("data-request-access", "write");
@@ -405,7 +408,7 @@ app.get("/login", (req, res) => {
       <button class="btn-primary" onclick="handleGetCode()">Send me a code</button>
       <button class="btn-ghost" onclick="showPasswordStep()">Sign in with username &amp; password</button>
       <div class="divider">or</div>
-      <a href="${authUrl}/api/auth/google?returnTo=${returnTo}" class="oauth-btn">
+      <a id="google-btn" href="#" class="oauth-btn">
         <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true">
           <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
           <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
@@ -414,7 +417,7 @@ app.get("/login", (req, res) => {
         </svg>
         Continue with Google
       </a>
-      <a href="${authUrl}/api/auth/yandex?returnTo=${returnTo}" class="oauth-btn yandex">
+      <a id="yandex-btn" href="#" class="oauth-btn yandex">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
           <path fill="#fff" d="M13.32 4H10.9C8.1 4 6.5 5.46 6.5 7.93c0 2.18 1.06 3.4 3.08 4.73L7 20h2.7l2.78-7.05-.6-.37C10.1 11.4 9.2 10.5 9.2 7.93c0-1.55.92-2.46 2.72-2.46h1.4V20H16V4h-2.68z"/>
         </svg>
@@ -446,15 +449,22 @@ app.get("/login", (req, res) => {
 
     <div class="footer">
       By continuing you agree to our
-      <a href="${authUrl}/terms" target="_blank">Terms of Use</a>
+      <a id="terms-link" href="#">Terms of Use</a>
       and
-      <a href="${authUrl}/privacy" target="_blank">Privacy Policy</a>.
+      <a id="privacy-link" href="#">Privacy Policy</a>.
     </div>
   </div>
 
 <script>
-const authUrl = "${authUrl}";
-const returnTo = decodeURIComponent("${returnTo}");
+// authUrl is set via JSON.stringify on the server — always a valid JS string literal.
+var authUrl = ${safeAuthUrl};
+var returnTo = decodeURIComponent(${JSON.stringify(returnTo)});
+
+// Set href values that depend on authUrl (avoids raw interpolation into href attributes)
+document.getElementById("google-btn").href  = authUrl + "/api/auth/google?returnTo=" + encodeURIComponent(returnTo);
+document.getElementById("yandex-btn").href  = authUrl + "/api/auth/yandex?returnTo=" + encodeURIComponent(returnTo);
+document.getElementById("terms-link").href   = authUrl + "/terms";
+document.getElementById("privacy-link").href = authUrl + "/privacy";
 
 ${telegramWidgetScript}
 
@@ -480,8 +490,8 @@ function showCodeStep(email) {
 }
 
 async function handleGetCode() {
-  const email = document.getElementById("email-input").value.trim();
-  const errEl = document.getElementById("email-error");
+  var email = document.getElementById("email-input").value.trim();
+  var errEl = document.getElementById("email-error");
   errEl.style.display = "none";
   if (!email || !email.includes("@")) {
     errEl.textContent = "Please enter a valid email address.";
@@ -489,11 +499,11 @@ async function handleGetCode() {
     return;
   }
   try {
-    const res = await fetch(authUrl + "/api/auth/magic-code", {
+    var res = await fetch(authUrl + "/api/auth/magic-code", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email: email }),
     });
     if (res.ok) {
       showCodeStep(email);
@@ -504,16 +514,16 @@ async function handleGetCode() {
       errEl.textContent = "Could not send code. Please try Google or Yandex instead.";
       errEl.style.display = "block";
     }
-  } catch {
+  } catch (e) {
     errEl.textContent = "Network error — please try again.";
     errEl.style.display = "block";
   }
 }
 
 async function handleVerifyCode() {
-  const email = document.getElementById("email-input").value.trim();
-  const code  = document.getElementById("code-input").value.trim();
-  const errEl = document.getElementById("code-error");
+  var email = document.getElementById("email-input").value.trim();
+  var code  = document.getElementById("code-input").value.trim();
+  var errEl = document.getElementById("code-error");
   errEl.style.display = "none";
   if (code.length < 6) {
     errEl.textContent = "Please enter the full 6-digit code.";
@@ -521,11 +531,11 @@ async function handleVerifyCode() {
     return;
   }
   try {
-    const res = await fetch(authUrl + "/api/auth/verify-code", {
+    var res = await fetch(authUrl + "/api/auth/verify-code", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ email, code }),
+      body: JSON.stringify({ email: email, code: code }),
     });
     if (res.ok) {
       window.location.href = returnTo;
@@ -533,33 +543,38 @@ async function handleVerifyCode() {
       errEl.textContent = "Incorrect or expired code — please try again.";
       errEl.style.display = "block";
     }
-  } catch {
+  } catch (e) {
     errEl.textContent = "Network error — please try again.";
     errEl.style.display = "block";
   }
 }
 
 async function handlePasswordLogin() {
-  const errEl = document.getElementById("pwd-error");
+  var errEl = document.getElementById("pwd-error");
   errEl.style.display = "none";
-  const res = await fetch(authUrl + "/api/auth/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify({
-      username: document.getElementById("username").value,
-      password: document.getElementById("password").value,
-    }),
-  });
-  if (res.ok) {
-    window.location.href = returnTo;
-  } else {
-    errEl.textContent = "Incorrect username or password.";
+  try {
+    var res = await fetch(authUrl + "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        username: document.getElementById("username").value,
+        password: document.getElementById("password").value,
+      }),
+    });
+    if (res.ok) {
+      window.location.href = returnTo;
+    } else {
+      errEl.textContent = "Incorrect username or password.";
+      errEl.style.display = "block";
+    }
+  } catch (e) {
+    errEl.textContent = "Network error — please try again.";
     errEl.style.display = "block";
   }
 }
 
-document.addEventListener("keydown", e => {
+document.addEventListener("keydown", function(e) {
   if (e.key !== "Enter") return;
   if (document.getElementById("code-step").style.display === "block")          handleVerifyCode();
   else if (document.getElementById("password-step").style.display === "block") handlePasswordLogin();
@@ -575,7 +590,7 @@ registerNotifyRoutes(app);
 registerTelegramLinkRoutes(app);
 app.use("/api/user", matchProfileRouter);
 
-// ── GET /api/admin/users ───────────────────────────────────────────────────
+// ── Shared auth helper ─────────────────────────────────────────────────────
 const VALID_ROLES = ["free", "premium", "host", "curator", "admin"];
 
 function isAdminOrService(req: any): boolean {
@@ -584,6 +599,7 @@ function isAdminOrService(req: any): boolean {
   return req.isAuthenticated?.() && (req.user as any)?.role === "admin";
 }
 
+// ── GET /api/admin/users ───────────────────────────────────────────────────
 app.get("/api/admin/users", async (req: any, res: any) => {
   if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
   try {
@@ -606,8 +622,9 @@ app.get("/api/admin/users", async (req: any, res: any) => {
 });
 
 // ── POST /api/admin/users/batch ───────────────────────────────────────────
-// Returns basic public fields for a list of user IDs.
-// Used by expatevents to enrich RSVP attendee lists.
+// Returns basic public fields for a list of meh-auth integer user IDs.
+// Used by expatevents to enrich RSVP attendee lists without exposing
+// private fields. Protected by SERVICE_SECRET or admin session.
 app.post("/api/admin/users/batch", async (req: any, res: any) => {
   if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
 
@@ -642,8 +659,9 @@ app.patch("/api/admin/users/:id/role", async (req: any, res: any) => {
   if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
 
   const targetId = parseInt(req.params.id);
-  const { role } = req.body;
+  if (isNaN(targetId)) return res.status(400).json({ error: "Invalid user ID" });
 
+  const { role } = req.body;
   if (!VALID_ROLES.includes(role)) {
     return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(", ")}` });
   }
@@ -676,7 +694,12 @@ app.post("/api/auth/change-password", async (req: any, res: any) => {
 
   try {
     const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
-    if (!user?.password) {
+
+    // Guard: user row must exist before accessing any property
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (!user.password) {
       return res.status(400).json({ error: "No password set on this account — use Set Password instead." });
     }
 
@@ -710,7 +733,12 @@ app.post("/api/auth/set-password", async (req: any, res: any) => {
 
   try {
     const [user] = await db.select().from(users).where(eq(users.id, (req.user as any).id));
-    if (user?.password) {
+
+    // Guard: user row must exist before accessing any property
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (user.password) {
       return res.status(400).json({ error: "Account already has a password. Use Change Password instead." });
     }
 
@@ -729,7 +757,9 @@ app.use((err: any, _req: any, res: any, _next: any) => {
   res.status(status).json({ error: err.message ?? "Internal server error" });
 });
 
-// ── Telegram webhook endpoint (only if WEBHOOK_URL is set) ────────────────
+// ── Telegram webhook endpoint ─────────────────────────────────────────────
+// Only registered when WEBHOOK_URL is set. The bot's startBot() call inside
+// bot.ts calls bot.api.setWebhook() — this route receives the updates.
 const webhookPath = "/telegram";
 if (process.env.WEBHOOK_URL) {
   app.post(webhookPath, async (req, res) => {
@@ -749,6 +779,5 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[meh-auth] Running on port ${PORT} (${process.env.NODE_ENV ?? "development"})`);
   console.log(`[meh-auth] Cookie domain: ${process.env.COOKIE_DOMAIN ?? "not set"}`);
   console.log(`[meh-auth] Allowed origins: ${process.env.ALLOWED_ORIGINS ?? "none set"}`);
-  // The bot starts automatically via startBot() inside bot.ts
   scheduleMatcher();
 });
