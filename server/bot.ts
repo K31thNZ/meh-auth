@@ -92,7 +92,7 @@ const LOCALE: Record<string, Record<string, any>> = {
     linkExpired:   "❌ That link has expired. Please generate a new one from your account settings.",
     helpText:      "🤖 *Help* — I send you events matching your interests and let you RSVP directly.\n\n/myevents — your organised events\n/stop — unsubscribe from notifications",
     going:         "✅ You're going!",
-    maybe:         "🤔 Maybe",
+    maybe:         "🤔 I'm interested",
     no:            "❌ Can't make it",
     cleared:       "Response cleared.",
     eventLive:     "🎉 *Your event is live!*\n\nHere's your shareable preview card. Forward it to any chat — people can RSVP directly from Telegram.",
