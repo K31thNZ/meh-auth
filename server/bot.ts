@@ -1085,12 +1085,23 @@ async function startBot(): Promise<void> {
     console.warn("[bot] TELEGRAM_BOT_TOKEN not set — bot disabled");
     return;
   }
+
   const webhookUrl = process.env.WEBHOOK_URL;
+
+  // grammY needs bot.init() to load bot info before handling updates
+  await bot.init();
+  console.log(`[bot] Bot @${bot.botInfo.username} initialised`);
+
   if (webhookUrl) {
+    console.log("[bot] Starting webhook mode on", webhookUrl);
     await bot.api.setWebhook(`${webhookUrl}/telegram`);
     console.log(`[bot] Webhook set → ${webhookUrl}/telegram`);
   } else {
-    bot.start({ onStart: info => console.log(`[bot] @${info.username} polling`) });
+    console.log("[bot] Starting polling mode");
+    // bot.start() also calls init(), but we already did – it will be ignored
+    bot.start({
+      onStart: (info) => console.log(`[bot] @${info.username} polling`),
+    });
   }
 }
 
