@@ -6,7 +6,6 @@
 // rsvps.userId stores the meh-auth integer user ID (no FK — cross-database reference).
 
 import { Bot, Context, session, SessionFlavor, InlineKeyboard } from "grammy";
-import { conversations, ConversationFlavor } from "@grammyjs/conversations";
 import { db } from "./db";
 import { users, pendingApprovals, events, notifications } from "@shared/schema";
 import { eq, and, isNotNull, sql } from "drizzle-orm";
@@ -31,7 +30,7 @@ interface SessionData {
   editingEventId?: number;
   awaitingField?: string;
 }
-type BotContext = Context & SessionFlavor<SessionData> & ConversationFlavor;
+type BotContext = Context & SessionFlavor<SessionData>;
 
 // ── Environment ────────────────────────────────────────────────────────────────
 
@@ -349,6 +348,12 @@ async function saveEvent(event: EventData): Promise<void> {
 }
 
 // ── Notification queue ─────────────────────────────────────────────────────────
+// Capped at MAX_QUEUE_SIZE to prevent unbounded memory growth under rate-limiting.
+// If the cap is hit, the oldest items are dropped and a warning is logged.
+// In practice this only triggers if Telegram rate-limits the bot for an extended
+// period while a large event is being dispatched.
+
+const MAX_QUEUE_SIZE = 2000;
 
 const notificationQueue: Array<{
   userId:     number;
@@ -392,6 +397,11 @@ async function processQueue(): Promise<void> {
 }
 
 function enqueueNotification(n: typeof notificationQueue[number]): void {
+  if (notificationQueue.length >= MAX_QUEUE_SIZE) {
+    // Drop the oldest item to make room — it will have already waited too long
+    const dropped = notificationQueue.shift();
+    console.warn(`[bot] Notification queue full (${MAX_QUEUE_SIZE}); dropped queued item for ${dropped?.telegramId}`);
+  }
   notificationQueue.push(n);
   // Kick off processing without awaiting — fire and forget
   processQueue().catch(err =>
@@ -405,7 +415,6 @@ export const bot = new Bot<BotContext>(process.env.TELEGRAM_BOT_TOKEN!);
 const rsvpCooldown = new Map<string, number>();
 
 bot.use(session({ initial: () => ({} as SessionData) }));
-bot.use(conversations());
 
 // ── /start ─────────────────────────────────────────────────────────────────────
 
@@ -459,7 +468,10 @@ bot.command("myevents", async (ctx) => {
     await ctx.reply("Your account is not linked. Visit expatevents.org → Settings → Connect Telegram.");
     return;
   }
-  const rows = await db.select().from(events).where(eq(events.organizerId, userId));
+  // events.organizerId is stored as integer in the meh-auth events cache table.
+  // resolveOrganiserUserId returns a number — cast explicitly to avoid silent
+  // type mismatches if the column type ever changes.
+  const rows = await db.select().from(events).where(eq(events.organizerId, Number(userId)));
   if (rows.length === 0) {
     await ctx.reply("You have no events yet.");
     return;
@@ -776,6 +788,10 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
     return;
   }
   rsvpCooldown.set(key, now);
+  // Evict entries older than 10 s to prevent unbounded map growth
+  for (const [k, v] of rsvpCooldown) {
+    if (now - v > 10_000) rsvpCooldown.delete(k);
+  }
 
   const [user] = await db.select({ id: users.id }).from(users).where(eq(users.telegramId, tgId));
   if (!user) {
