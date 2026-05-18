@@ -50,9 +50,6 @@ const CATEGORY_ICONS: Record<string, string> = {
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 // ── Fetch with timeout ─────────────────────────────────────────────────────────
-// Node's global fetch has no built-in timeout. Without this, a call to a
-// sleeping Render service hangs indefinitely and blocks the entire approval flow.
-
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
@@ -180,12 +177,6 @@ async function markUserUnblocked(telegramId: string): Promise<void> {
 }
 
 // ── In-memory dedup ────────────────────────────────────────────────────────────
-// Tracks which telegramIds have already been notified for a given event ID
-// within this server session. Cleared on restart — acceptable because a restart
-// would only cause a harmless duplicate notification at worst.
-//
-// IMPORTANT: This map must be cleared for an event before re-dispatching
-// (e.g. after a failed attempt). See clearNotifiedForEvent().
 const notifiedForEvent = new Map<number, Set<string>>();
 
 function clearNotifiedForEvent(eventId: number): void {
@@ -220,7 +211,6 @@ async function loadRsvpCounts(eventId: number): Promise<RsvpCounts> {
       return { going: data.going ?? 0, maybe: data.maybe ?? 0, no: data.no ?? 0 };
     }
   } catch (err: any) {
-    // Timeout or network error — return zeros rather than blocking
     console.warn(`[bot] loadRsvpCounts for event ${eventId} failed (${err?.message}) — using 0`);
   }
   return { going: 0, maybe: 0, no: 0 };
@@ -301,8 +291,6 @@ async function getPendingApproval(token: string): Promise<EventData | null> {
     return null;
   }
 
-  // eventData may already be a parsed object if the Postgres driver
-  // auto-deserialises jsonb columns — handle both cases defensively.
   const raw = row.eventData;
   return (typeof raw === "string" ? JSON.parse(raw) : raw) as EventData;
 }
@@ -312,8 +300,6 @@ async function deletePendingApproval(token: string): Promise<void> {
 }
 
 // ── Event cache ────────────────────────────────────────────────────────────────
-// Saves a local copy of the event in the meh-auth DB for /myevents, /reshare etc.
-// This is best-effort — a failure here must never block notification dispatch.
 
 async function saveEvent(event: EventData): Promise<void> {
   try {
@@ -345,16 +331,11 @@ async function saveEvent(event: EventData): Promise<void> {
         },
       });
   } catch (err: any) {
-    // Non-fatal — log and continue. Notifications must still go out.
     console.error(`[bot] saveEvent failed for event ${event.id}:`, err?.message);
   }
 }
 
 // ── Notification queue ─────────────────────────────────────────────────────────
-// Capped at MAX_QUEUE_SIZE to prevent unbounded memory growth under rate-limiting.
-// If the cap is hit, the oldest items are dropped and a warning is logged.
-// In practice this only triggers if Telegram rate-limits the bot for an extended
-// period while a large event is being dispatched.
 
 const MAX_QUEUE_SIZE = 2000;
 
@@ -401,12 +382,10 @@ async function processQueue(): Promise<void> {
 
 function enqueueNotification(n: typeof notificationQueue[number]): void {
   if (notificationQueue.length >= MAX_QUEUE_SIZE) {
-    // Drop the oldest item to make room — it will have already waited too long
     const dropped = notificationQueue.shift();
     console.warn(`[bot] Notification queue full (${MAX_QUEUE_SIZE}); dropped queued item for ${dropped?.telegramId}`);
   }
   notificationQueue.push(n);
-  // Kick off processing without awaiting — fire and forget
   processQueue().catch(err =>
     console.error("[bot] processQueue threw unexpectedly:", err?.message)
   );
@@ -471,9 +450,6 @@ bot.command("myevents", async (ctx) => {
     await ctx.reply("Your account is not linked. Visit expatevents.org → Settings → Connect Telegram.");
     return;
   }
-  // events.organizerId is stored as integer in the meh-auth events cache table.
-  // resolveOrganiserUserId returns a number — cast explicitly to avoid silent
-  // type mismatches if the column type ever changes.
   const rows = await db.select().from(events).where(eq(events.organizerId, Number(userId)));
   if (rows.length === 0) {
     await ctx.reply("You have no events yet.");
@@ -613,18 +589,11 @@ async function sendOrgPreviewCard(event: EventData): Promise<void> {
 }
 
 // ── Dispatch notifications ─────────────────────────────────────────────────────
-// Separated into two distinct phases so a failure in saveEvent (DB cache) can
-// never prevent Telegram messages from going out.
-//
-// Phase 1 — in-app notifications + Telegram queue (must complete fully)
-// Phase 2 — saveEvent to local cache (best-effort, errors logged not thrown)
-
 export async function dispatchEventNotifications(
   event: EventData,
 ): Promise<{ sent: number; inApp: number }> {
   console.log(`[bot] dispatchEventNotifications START — event ${event.id} "${event.title}" category="${event.category}"`);
 
-  // ── Find matching users ──────────────────────────────────────────────────
   let matchingUsers: any[] = [];
   try {
     matchingUsers = await db
@@ -633,22 +602,17 @@ export async function dispatchEventNotifications(
       .where(sql`${event.category} = ANY(${users.interests})`);
   } catch (err: any) {
     console.error(`[bot] dispatchEventNotifications: DB query failed:`, err?.message);
-    throw err; // re-throw so the caller knows dispatch failed
+    throw err;
   }
 
   console.log(`[bot] dispatchEventNotifications — ${matchingUsers.length} user(s) match category "${event.category}"`);
 
   if (matchingUsers.length === 0) {
     console.log(`[bot] dispatchEventNotifications — no matching users, saving event cache and returning`);
-    await saveEvent(event); // best-effort cache
+    await saveEvent(event);
     return { sent: 0, inApp: 0 };
   }
 
-  // ── Dedup: ensure the set exists for this event ─────────────────────────
-  // NOTE: The set is NOT pre-populated from the DB. If the server was
-  // restarted between a failed attempt and a re-approval, the set is empty
-  // and all users will be notified again. This is intentional — a restart
-  // clears the in-memory dedup so re-approvals work correctly.
   if (!notifiedForEvent.has(event.id)) {
     notifiedForEvent.set(event.id, new Set());
   }
@@ -658,19 +622,13 @@ export async function dispatchEventNotifications(
   const dateStr = safeMoscowStr(event.date);
   const desc    = (event.description ?? "").slice(0, 200);
 
-  // ── Fetch RSVP counts ONCE for the keyboard (not per user) ─────────────
-  // Uses fetchWithTimeout — if expatevents is sleeping this returns {0,0,0}
-  // and does not block the entire notification loop.
   const counts = await loadRsvpCounts(event.id);
   console.log(`[bot] dispatchEventNotifications — RSVP counts: going=${counts.going} maybe=${counts.maybe} no=${counts.no}`);
 
   let sent = 0;
   let inApp = 0;
 
-  // ── Phase 1: notify each user ────────────────────────────────────────────
   for (const user of matchingUsers) {
-
-    // ── In-app notification (always attempted, even without telegramId) ────
     try {
       await db.insert(notifications).values({
         userId:   user.id,
@@ -683,13 +641,11 @@ export async function dispatchEventNotifications(
       });
       inApp++;
     } catch (err: any) {
-      // Duplicate key = already notified — safe to ignore
       if (!err?.message?.includes("duplicate") && !err?.message?.includes("unique")) {
         console.error(`[bot] in-app notification failed for user ${user.id}:`, err?.message);
       }
     }
 
-    // ── Telegram notification ──────────────────────────────────────────────
     if (!user.telegramId) continue;
     if (userBlocked(user)) {
       console.log(`[bot] Skipping blocked user ${user.id} (${user.telegramId})`);
@@ -710,7 +666,6 @@ export async function dispatchEventNotifications(
     console.log(`[bot] Queued notification for user ${user.id} (${user.telegramId})`);
   }
 
-  // ── Phase 2: cache the event (best-effort, non-blocking) ─────────────────
   await saveEvent(event);
 
   console.log(`[bot] dispatchEventNotifications DONE — event ${event.id}: ${inApp} in-app, ${sent} Telegram queued`);
@@ -778,7 +733,6 @@ export async function notifyMatchingUsers(
 }
 
 // ── Callback: RSVP ────────────────────────────────────────────────────────────
-
 bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   const status  = ctx.match[1] as "going" | "maybe" | "no";
   const eventId = parseInt(ctx.match[2]);
@@ -818,8 +772,42 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   const sourceChatId    = chat?.id ?? 0;
   const sourceChatTitle = chat && "title" in chat ? (chat as any).title : undefined;
 
-  const counts = await setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle);
-  await ctx.editMessageReplyMarkup({ reply_markup: rsvpKeyboardForCounts(eventId, counts) }).catch(() => {});
+  // Persist the RSVP in ExpatEvents
+  await setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle);
+
+  // Build a status line to append to the message
+  const lang = ctx.from?.language_code?.startsWith("ru") ? "ru" : "en";
+  const statusLabel = newStatus === "none"
+    ? t(ctx, "cleared")
+    : t(ctx, newStatus);
+
+  const msg = ctx.callbackQuery.message;
+  if (msg) {
+    const existingText = "text" in msg ? msg.text : "caption" in msg ? (msg as any).caption : "";
+    const updatedText = existingText
+      ? `${existingText}\n\n_${statusLabel}_`
+      : statusLabel;
+
+    // Remove the inline keyboard (clear the message)
+    const emptyKeyboard = new InlineKeyboard();
+
+    try {
+      if ("text" in msg) {
+        await ctx.api.editMessageText(msg.chat.id, msg.message_id, updatedText, {
+          parse_mode: "Markdown",
+          reply_markup: emptyKeyboard,
+        });
+      } else if ("caption" in msg) {
+        await ctx.api.editMessageCaption(msg.chat.id, msg.message_id, {
+          caption: updatedText,
+          parse_mode: "Markdown",
+          reply_markup: emptyKeyboard,
+        });
+      }
+    } catch (err: any) {
+      console.error(`[bot] Failed to edit RSVP message: ${err?.message}`);
+    }
+  }
 });
 
 // ── Callback: Approve event ───────────────────────────────────────────────────
@@ -893,7 +881,6 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
       `${originalText}\n\n${summary}`,
       { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
     ).catch(async () => {
-      // If editing fails, send a new message
       await ctx.reply(
         `📬 *Notifications sent for "${event!.title}"*\n\n• *${result.sent}* Telegram\n• *${result.inApp}* in-app`,
         { parse_mode: "Markdown" },
@@ -956,11 +943,6 @@ bot.command("approve_all", async (ctx) => {
   await ctx.reply(`✅ Approved and dispatched ${rows.length} event${rows.length !== 1 ? "s" : ""}.`);
 });
 
-// ── /testnotify — sends a test message directly to the admin ──────────────────
-// Use this to verify the full pipeline without publishing a real event.
-// Usage: /testnotify
-// The bot will send you a sample event card with RSVP buttons.
-
 bot.command("testnotify", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
 
@@ -969,7 +951,7 @@ bot.command("testnotify", async (ctx) => {
     id:          999999,
     title:       "🧪 Test Event — Pipeline Check",
     category:    "social",
-    date:        new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), // 2 days from now
+    date:        new Date(Date.now() + 2 * 24 * 60 * 60 * 1000),
     venueCity:   "Moscow",
     venueAddress: "Test Venue, 1 Test Street",
     description: "This is a test notification to verify the dispatch pipeline is working end-to-end.",
@@ -989,11 +971,6 @@ bot.command("testnotify", async (ctx) => {
     await ctx.reply(`❌ Test failed: ${err?.message}`);
   }
 });
-
-// ── /testdispatch — runs dispatchEventNotifications for a real event ──────────
-// Usage: /testdispatch <eventId>
-// Clears the dedup set first so all matching users are notified even if they
-// were notified before. Use on a test event only.
 
 bot.command("testdispatch", async (ctx) => {
   if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
