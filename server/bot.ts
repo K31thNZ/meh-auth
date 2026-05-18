@@ -301,7 +301,10 @@ async function getPendingApproval(token: string): Promise<EventData | null> {
     return null;
   }
 
-  return JSON.parse(row.eventData as string) as EventData;
+  // eventData may already be a parsed object if the Postgres driver
+  // auto-deserialises jsonb columns — handle both cases defensively.
+  const raw = row.eventData;
+  return (typeof raw === "string" ? JSON.parse(raw) : raw) as EventData;
 }
 
 async function deletePendingApproval(token: string): Promise<void> {
@@ -810,8 +813,8 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
     if (res.ok) oldStatus = (await res.json()).status;
   } catch { /* non-fatal */ }
 
-  const newStatus       = (oldStatus === status) ? "none" : status;
-  const chat            = ctx.chat;
+  const newStatus   = (oldStatus === status) ? "none" : status;
+  const chat        = ctx.chat;
   const sourceChatId    = chat?.id ?? 0;
   const sourceChatTitle = chat && "title" in chat ? (chat as any).title : undefined;
 
@@ -855,7 +858,7 @@ bot.callbackQuery(/^approve_event:(.+)$/, async (ctx) => {
   clearNotifiedForEvent(event.id);
 
   // 5. Edit admin message to show progress
-  const adminMsg     = ctx.callbackQuery.message;
+  const adminMsg = ctx.callbackQuery.message;
   const originalText = (adminMsg && "text" in adminMsg) ? (adminMsg as any).text as string : "";
   if (adminMsg && "text" in adminMsg) {
     await ctx.api.editMessageText(
@@ -963,13 +966,13 @@ bot.command("testnotify", async (ctx) => {
 
   const tgId = String(ctx.from!.id);
   const testEvent: EventData = {
-    id:           999999,
-    title:        "🧪 Test Event — Pipeline Check",
-    category:     "social",
-    date:         new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), // 2 days from now
-    venueCity:    "Moscow",
+    id:          999999,
+    title:       "🧪 Test Event — Pipeline Check",
+    category:    "social",
+    date:        new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), // 2 days from now
+    venueCity:   "Moscow",
     venueAddress: "Test Venue, 1 Test Street",
-    description:  "This is a test notification to verify the dispatch pipeline is working end-to-end.",
+    description: "This is a test notification to verify the dispatch pipeline is working end-to-end.",
     organizerTelegramId: tgId,
   };
 
@@ -1023,10 +1026,7 @@ bot.command("findevents", async (ctx) => {
     .where(sql`LOWER(${events.title}) LIKE ${"%" + query.toLowerCase() + "%"}`);
   if (results.length === 0) { await ctx.reply("No events found."); return; }
   for (const e of results) {
-    await ctx.reply(
-      `*${e.title}* (ID ${e.id})\n/attendees_${e.id}  /reshare_${e.id}  /testdispatch ${e.id}`,
-      { parse_mode: "Markdown" },
-    );
+    await ctx.reply(`*${e.title}* (ID ${e.id})\n/attendees_${e.id}  /reshare_${e.id}  /testdispatch ${e.id}`, { parse_mode: "Markdown" });
   }
 });
 
@@ -1085,14 +1085,6 @@ async function startBot(): Promise<void> {
     console.warn("[bot] TELEGRAM_BOT_TOKEN not set — bot disabled");
     return;
   }
-
-  // Initialise bot info before handling any updates. In webhook mode grammY
-  // does not call the Telegram API on construction, so botInfo is not populated
-  // until init() is explicitly called. Without this, handleUpdate() throws
-  // "Bot not initialized!" on every incoming webhook request.
-  await bot.init();
-  console.log(`[bot] Initialised as @${bot.botInfo.username}`);
-
   const webhookUrl = process.env.WEBHOOK_URL;
   if (webhookUrl) {
     await bot.api.setWebhook(`${webhookUrl}/telegram`);
