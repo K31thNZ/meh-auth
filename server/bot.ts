@@ -216,6 +216,26 @@ async function loadRsvpCounts(eventId: number): Promise<RsvpCounts> {
   return { going: 0, maybe: 0, no: 0 };
 }
 
+interface TicketBuyer {
+  attendeeId:   number;
+  attendeeName: string;
+  username?:    string | null;
+  telegramId?:  string | null;
+}
+
+async function loadTicketBuyers(eventId: number): Promise<{ count: number; buyers: TicketBuyer[] }> {
+  try {
+    const res = await fetchWithTimeout(
+      `${EXPAT_API_URL}/api/bot/events/${eventId}/ticket-buyers`,
+      { headers: { "X-Bot-Secret": EXPAT_API_SECRET } },
+    );
+    if (res.ok) return await res.json();
+  } catch (err: any) {
+    console.warn(`[bot] loadTicketBuyers for event ${eventId} failed (${err?.message})`);
+  }
+  return { count: 0, buyers: [] };
+}
+
 async function setRsvpStatus(
   mehAuthUserId: number,
   eventId: number,
@@ -456,9 +476,13 @@ bot.command("myevents", async (ctx) => {
     return;
   }
   for (const e of rows) {
-    const counts = await loadRsvpCounts(e.id);
+    const [counts, ticketData] = await Promise.all([
+      loadRsvpCounts(e.id),
+      loadTicketBuyers(e.id),
+    ]);
+    const footer = buildRsvpStatusFooter(counts, ticketData);
     await ctx.reply(
-      `*${e.title}*\n📅 ${safeMoscowStr(e.date)}\n✅ ${counts.going}  🤔 ${counts.maybe}  ❌ ${counts.no}\n\n` +
+      `*${e.title}*\n📅 ${safeMoscowStr(e.date)}${footer}\n\n` +
       `/attendees_${e.id}   /reshare_${e.id}   /edit_${e.id}`,
       { parse_mode: "Markdown" },
     );
@@ -468,19 +492,39 @@ bot.command("myevents", async (ctx) => {
 // ── /attendees_{id} ────────────────────────────────────────────────────────────
 
 bot.hears(/^\/attendees_(\d+)$/, async (ctx) => {
-  const eventId   = parseInt(ctx.match[1]);
-  const attendees = await getEventAttendees(eventId);
+  const eventId = parseInt(ctx.match[1]);
+  const [attendees, ticketData] = await Promise.all([
+    getEventAttendees(eventId),
+    loadTicketBuyers(eventId),
+  ]);
+
+  const lines: string[] = [`*Attendees — event #${eventId}*`];
+
+  // ── RSVP section ──
   if (attendees.length === 0) {
-    await ctx.reply("No RSVPs yet for this event.");
-    return;
+    lines.push("\n_No RSVPs yet._");
+  } else {
+    lines.push("");
+    for (const a of attendees) {
+      const emoji = a.status === "going" ? "✅" : a.status === "maybe" ? "🤔" : "❌";
+      const name  = a.username ? `@${a.username}` : a.telegramId ?? String(a.userId);
+      const from  = a.sourceChatTitle ? ` _(${a.sourceChatTitle})_` : "";
+      lines.push(`${emoji} ${name}${from}`);
+    }
   }
-  const lines: string[] = [`*Attendees — event #${eventId}*\n`];
-  for (const a of attendees) {
-    const emoji = a.status === "going" ? "✅" : a.status === "maybe" ? "🤔" : "❌";
-    const name  = a.username ? `@${a.username}` : a.telegramId ?? String(a.userId);
-    const from  = a.sourceChatTitle ? ` _(${a.sourceChatTitle})_` : "";
-    lines.push(`${emoji} ${name}${from}`);
+
+  // ── Ticket buyers section ──
+  if (ticketData.count > 0) {
+    lines.push("");
+    lines.push(`🎟 *${ticketData.count} ticket buyer${ticketData.count !== 1 ? "s" : ""}:*`);
+    for (const b of ticketData.buyers) {
+      const name = b.username ? `@${b.username}` : b.attendeeName;
+      lines.push(`  • ${name}`);
+    }
+  } else {
+    lines.push("\n_No ticket purchases yet._");
   }
+
   await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
 });
 
@@ -537,11 +581,81 @@ export async function notifyOrganiserDemand(organiserId: number, match: {
 function rsvpKeyboardForCounts(
   eventId: number,
   counts: { going: number; maybe: number; no: number },
+  ticketCount?: number,
 ): InlineKeyboard {
-  return new InlineKeyboard()
+  const kb = new InlineKeyboard()
     .text(`✅ Going${counts.going ? ` (${counts.going})` : ""}`,   `rsvp:going:${eventId}`)
     .text(`🤔 Maybe${counts.maybe ? ` (${counts.maybe})` : ""}`,   `rsvp:maybe:${eventId}`)
     .text(`❌ Can't${counts.no   ? ` (${counts.no})`   : ""}`,     `rsvp:no:${eventId}`);
+  return kb;
+}
+
+function buildRsvpStatusLine(
+  counts: { going: number; maybe: number; no: number },
+  ticketCount: number,
+  userStatus?: string,
+): string {
+  const parts: string[] = [];
+  if (counts.going) parts.push(`✅ *${counts.going}* going`);
+  if (counts.maybe) parts.push(`🤔 *${counts.maybe}* interested`);
+  if (ticketCount)  parts.push(`🎟 *${ticketCount}* ticket${ticketCount !== 1 ? "s" : ""} sold`);
+  const line = parts.length ? parts.join("  ·  ") : "";
+  const myStatus = userStatus && userStatus !== "none"
+    ? `\n_Your RSVP: ${userStatus === "going" ? "✅ going" : userStatus === "maybe" ? "🤔 interested" : "❌ can\'t make it"}_`
+    : "";
+  return line ? `\n\n${line}${myStatus}` : myStatus;
+}
+
+// ── RSVP status footer helpers ────────────────────────────────────────────────
+
+/**
+ * Builds the live-counts footer appended to every event card.
+ * Ticket buyers list is shown when there are paid orders.
+ */
+function buildRsvpStatusFooter(
+  counts: { going: number; maybe: number; no: number },
+  ticketData: { count: number; buyers: TicketBuyer[] },
+  myStatus?: string,
+): string {
+  const lines: string[] = [];
+
+  // Interest / going counts
+  const countParts: string[] = [];
+  if (counts.going) countParts.push(`✅ *${counts.going}* going`);
+  if (counts.maybe) countParts.push(`🤔 *${counts.maybe}* interested`);
+  if (countParts.length) lines.push(countParts.join("  ·  "));
+
+  // Ticket buyers list
+  if (ticketData.count > 0) {
+    const names = ticketData.buyers
+      .slice(0, 8)
+      .map(b => b.username ? `@${b.username}` : b.attendeeName)
+      .join(", ");
+    const extra = ticketData.count > 8 ? ` +${ticketData.count - 8} more` : "";
+    lines.push(`🎟 *${ticketData.count}* ticket${ticketData.count !== 1 ? "s" : ""} sold: ${names}${extra}`);
+  }
+
+  // User's own RSVP status
+  if (myStatus && myStatus !== "none") {
+    const label = myStatus === "going"
+      ? "✅ you're going"
+      : myStatus === "maybe"
+      ? "🤔 you're interested"
+      : "❌ you can't make it";
+    lines.push(`_${label}_`);
+  }
+
+  return lines.length ? "\n\n" + lines.join("\n") : "";
+}
+
+/**
+ * Strips any previously appended RSVP footer from message text
+ * so we can replace it with fresh data.
+ * Footer always starts with a blank line followed by ✅/🤔/🎟/_you
+ */
+function stripRsvpFooter(text: string): string {
+  // Remove everything from the last occurrence of \n\n(✅|🤔|🎟|_you) onwards
+  return text.replace(/\n\n(?:[✅🤔🎟]|_you)[\s\S]*$/, "").trimEnd();
 }
 
 // ── Preview card text ──────────────────────────────────────────────────────────
@@ -658,9 +772,11 @@ export async function dispatchEventNotifications(
 
     const lang     = userLang(user);
     const text     = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.venueAddress, desc, event.id);
+    const footer  = buildRsvpStatusFooter(counts, { count: 0, buyers: [] });
+    const msgText = footer ? text + footer : text;
     const keyboard = rsvpKeyboardForCounts(event.id, counts);
 
-    enqueueNotification({ userId: user.id, telegramId: user.telegramId, text, imageUrl: event.imageUrl, keyboard, lang });
+    enqueueNotification({ userId: user.id, telegramId: user.telegramId, text: msgText, imageUrl: event.imageUrl, keyboard, lang });
     alreadyNotified.add(user.telegramId);
     sent++;
     console.log(`[bot] Queued notification for user ${user.id} (${user.telegramId})`);
@@ -781,38 +897,41 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   const sourceChatTitle = chat && "title" in chat ? (chat as any).title : undefined;
 
   // Persist the RSVP in ExpatEvents
-  await setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle);
-
-  // Build a status line to append to the message
-  const lang = ctx.from?.language_code?.startsWith("ru") ? "ru" : "en";
-  const statusLabel = newStatus === "none"
-    ? t(ctx, "cleared")
-    : t(ctx, newStatus);
+  const [newCounts, ticketData] = await Promise.all([
+    setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle),
+    loadTicketBuyers(eventId),
+  ]);
 
   const msg = ctx.callbackQuery.message;
-  if (msg) {
-    const existingText = "text" in msg ? msg.text : "caption" in msg ? (msg as any).caption : "";
-    const updatedText = existingText
-      ? `${existingText}\n\n_${statusLabel}_`
-      : statusLabel;
+  if (!msg) return;
 
-    // Remove the inline keyboard (clear the message)
-    const emptyKeyboard = new InlineKeyboard();
+  // Build the refreshed keyboard with live counts
+  const newKeyboard = rsvpKeyboardForCounts(eventId, newCounts);
 
-    try {
-      if ("text" in msg) {
-        await ctx.api.editMessageText(msg.chat.id, msg.message_id, updatedText, {
-          parse_mode: "Markdown",
-          reply_markup: emptyKeyboard,
-        });
-      } else if ("caption" in msg) {
-        await ctx.api.editMessageCaption(msg.chat.id, msg.message_id, {
-          caption: updatedText,
-          parse_mode: "Markdown",
-          reply_markup: emptyKeyboard,
-        });
-      }
-    } catch (err: any) {
+  // Build the status footer to append/replace at end of message
+  const statusFooter = buildRsvpStatusFooter(newCounts, ticketData, newStatus);
+
+  // Strip any old status footer (lines starting with ✅/🤔/🎟/_Your RSVP) from existing text
+  const existingText = "text" in msg ? (msg.text ?? "") : ("caption" in msg ? ((msg as any).caption ?? "") : "");
+  const baseText = stripRsvpFooter(existingText);
+  const updatedText = baseText + statusFooter;
+
+  try {
+    if ("text" in msg) {
+      await ctx.api.editMessageText(msg.chat.id, msg.message_id, updatedText, {
+        parse_mode:   "Markdown",
+        reply_markup: newKeyboard,
+      });
+    } else if ("caption" in msg) {
+      await ctx.api.editMessageCaption(msg.chat.id, msg.message_id, {
+        caption:      updatedText,
+        parse_mode:   "Markdown",
+        reply_markup: newKeyboard,
+      });
+    }
+  } catch (err: any) {
+    // "message not modified" is benign — Telegram throws if content didn't change
+    if (!err?.message?.includes("not modified")) {
       console.error(`[bot] Failed to edit RSVP message: ${err?.message}`);
     }
   }
