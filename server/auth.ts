@@ -14,6 +14,8 @@ import { storage } from "./storage";
 import { runIncrementalMatcher } from "./matcher";
 import { sendToUser } from "./bot";
 import type { Express } from "express";
+import { db } from "./db";
+import { telegramLinkTokens } from "@shared/schema";
 
 const scryptAsync = promisify(scrypt);
 
@@ -407,6 +409,37 @@ export function registerAuthRoutes(app: Express) {
       res.json({ ok: true });
     } catch (err) { next(err); }
   });
+
+  // ── Telegram link token generation ───────────────────────────────────────────
+  // POST /api/telegram/link
+  // Generates a one-time deep-link token for the Telegram bot to link accounts.
+  app.post("/api/telegram/link", requireAuth, async (req: any, res, next) => {
+    try {
+      const botUsername = process.env.TELEGRAM_BOT_NAME ?? process.env.TELEGRAM_BOT_USERNAME ?? "";
+      if (!botUsername) {
+        return res.status(503).json({ message: "Telegram bot is not configured" });
+      }
+      const userId  = (req.user as any).id;
+      const token   = randomBytes(32).toString("hex");
+      const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+
+      await db.insert(telegramLinkTokens).values({ token, userId, expiresAt: expires, used: false });
+
+      const deepLink = `https://t.me/${botUsername}?start=link_${token}`;
+      res.json({ url: deepLink });
+    } catch (err) { next(err); }
+  });
+
+  // ── Telegram unlink ───────────────────────────────────────────────────────────
+  // POST /api/telegram/unlink
+  app.post("/api/telegram/unlink", requireAuth, async (req: any, res, next) => {
+    try {
+      const userId = (req.user as any).id;
+      await storage.updateUser(userId, { telegramId: null });
+      res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
+
 }
 
 // ── Middleware ─────────────────────────────────────────────────────────────
