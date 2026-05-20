@@ -719,7 +719,15 @@ export async function notifyMatchingUsers(
     .text("❌ Decline", `decline_event:${token}`);
 
   try {
-    await bot.api.sendMessage(ADMIN_TELEGRAM_ID, adminText, { parse_mode: "Markdown", reply_markup: keyboard });
+    if (event.imageUrl) {
+      await bot.api.sendPhoto(ADMIN_TELEGRAM_ID, event.imageUrl, {
+        caption:      adminText,
+        parse_mode:   "Markdown",
+        reply_markup: keyboard,
+      });
+    } else {
+      await bot.api.sendMessage(ADMIN_TELEGRAM_ID, adminText, { parse_mode: "Markdown", reply_markup: keyboard });
+    }
     console.log(`[bot] Event ${event.id} awaiting admin approval (token: ${token})`);
   } catch (err: any) {
     console.error("[bot] Failed to message admin, dispatching immediately:", err?.message);
