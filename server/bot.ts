@@ -37,6 +37,7 @@ type BotContext = Context & SessionFlavor<SessionData>;
 const EXPAT_API_URL     = (process.env.EXPAT_API_URL ?? "https://expatevents.org").replace(/\/$/, "");
 const EXPAT_API_SECRET  = process.env.EXPAT_API_SECRET ?? "";
 const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID;
+const BOT_USERNAME       = (process.env.TELEGRAM_BOT_NAME ?? process.env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, "");
 
 // Single source of truth — shared with auth.ts via this map.
 // TODO: move to shared/categories.ts to eliminate all duplication.
@@ -425,7 +426,70 @@ bot.command("start", async (ctx) => {
   await persistUserLanguage(telegramId, ctx.from?.language_code);
   await markUserUnblocked(telegramId);
 
-  const token = ctx.match?.trim();
+  const token = ctx.match?.trim() ?? "";
+
+  // ── Deep-link: RSVP from forwarded card ───────────────────────────────────
+  // Pattern: rsvp_EVENTID_yes  |  rsvp_EVENTID_interested
+  const rsvpMatch = token.match(/^rsvp_(\d+)_(yes|interested)$/);
+  if (rsvpMatch) {
+    const eventId = parseInt(rsvpMatch[1]);
+    const status  = rsvpMatch[2] === "yes" ? "going" as const : "maybe" as const;
+
+    const [existingUser] = await db.select({ id: users.id }).from(users).where(eq(users.telegramId, telegramId));
+
+    if (!existingUser) {
+      // Not linked — onboard first, then send back to event
+      const returnUrl = `https://expatevents.org/events/${eventId}`;
+      await ctx.reply(
+        `👋 Welcome to *ExpatEvents*!\n\nTo RSVP you need a free account — it only takes a minute.\n\n` +
+        `[Create your account →](https://expatevents.org/register?return_to=${encodeURIComponent(returnUrl)})\n\n` +
+        `Once signed up, tap the RSVP button again!`,
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    // Record RSVP
+    const [counts, ticketData] = await Promise.all([
+      setRsvpStatus(existingUser.id, eventId, status, 0, undefined),
+      loadTicketBuyers(eventId),
+    ]);
+
+    const label  = status === "going" ? "✅ You're going!" : "🤔 You're marked as interested!";
+    const footer = buildRsvpStatusFooter(counts, ticketData, status);
+    const eventUrl = `https://expatevents.org/events/${eventId}`;
+    await ctx.reply(
+      `${label}${footer}\n\n[View event & purchase tickets →](${eventUrl})`,
+      { parse_mode: "Markdown" },
+    );
+
+    // Notify the organiser (non-blocking)
+    notifyOrganiserRsvp(eventId, status, counts, ticketData).catch(() => {});
+    return;
+  }
+
+  // ── Deep-link: View ticket buyers list ────────────────────────────────────
+  // Pattern: buyers_EVENTID
+  const buyersMatch = token.match(/^buyers_(\d+)$/);
+  if (buyersMatch) {
+    const eventId    = parseInt(buyersMatch[1]);
+    const ticketData = await loadTicketBuyers(eventId);
+
+    if (ticketData.count === 0) {
+      await ctx.reply(`🎟 No tickets sold yet for event #${eventId}.`);
+      return;
+    }
+
+    const lines = [`🎟 *${ticketData.count} ticket buyer${ticketData.count !== 1 ? "s" : ""}* — event #${eventId}\n`];
+    for (const b of ticketData.buyers) {
+      const name = b.username ? `@${b.username}` : b.attendeeName;
+      lines.push(`• ${name}`);
+    }
+    await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+    return;
+  }
+
+  // ── Account linking token ──────────────────────────────────────────────────
   if (token) {
     try {
       const { handleTelegramStartToken } = await import("./telegram-link");
@@ -436,9 +500,9 @@ bot.command("start", async (ctx) => {
     }
     return;
   }
+
   await ctx.reply(t(ctx, "welcome"), { parse_mode: "Markdown" });
 });
-
 // ── /stop ──────────────────────────────────────────────────────────────────────
 
 bot.command("stop", async (ctx) => {
@@ -542,8 +606,8 @@ bot.hears(/^\/reshare_(\d+)$/, async (ctx) => {
   const [event] = await db.select().from(events).where(eq(events.id, eventId));
   if (!event) { await ctx.reply("Event not found."); return; }
   const cardText = buildPreviewCardText(event as unknown as EventData);
-  const counts   = await loadRsvpCounts(eventId);
-  const keyboard = rsvpKeyboardForCounts(eventId, counts);
+  const [counts, ticketData] = await Promise.all([loadRsvpCounts(eventId), loadTicketBuyers(eventId)]);
+  const keyboard = rsvpKeyboardForCounts(eventId, counts, ticketData.count);
   try {
     if (event.imageUrl) {
       await ctx.replyWithPhoto(event.imageUrl, { caption: cardText, parse_mode: "Markdown", reply_markup: keyboard });
@@ -583,13 +647,22 @@ function rsvpKeyboardForCounts(
   counts: { going: number; maybe: number; no: number },
   ticketCount?: number,
 ): InlineKeyboard {
+  // URL buttons survive message forwarding — deep-link into the bot.
+  if (!BOT_USERNAME) {
+    // Fallback: inline callback buttons (no forwarding support)
+    return new InlineKeyboard()
+      .text(`✅ Yes${counts.going   ? ` (${counts.going})`   : ""}`, `rsvp:going:${eventId}`)
+      .text(`🤔 Interested${counts.maybe ? ` (${counts.maybe})` : ""}`, `rsvp:maybe:${eventId}`);
+  }
+  const base = `https://t.me/${BOT_USERNAME}`;
   const kb = new InlineKeyboard()
-    .text(`✅ Going${counts.going ? ` (${counts.going})` : ""}`,   `rsvp:going:${eventId}`)
-    .text(`🤔 Maybe${counts.maybe ? ` (${counts.maybe})` : ""}`,   `rsvp:maybe:${eventId}`)
-    .text(`❌ Can't${counts.no   ? ` (${counts.no})`   : ""}`,     `rsvp:no:${eventId}`);
+    .url(`✅ Yes${counts.going     ? ` (${counts.going})`     : ""}`, `${base}?start=rsvp_${eventId}_yes`)
+    .url(`🤔 Interested${counts.maybe ? ` (${counts.maybe})` : ""}`, `${base}?start=rsvp_${eventId}_interested`);
+  if (ticketCount) {
+    kb.row().url(`🎟 ${ticketCount} ticket${ticketCount !== 1 ? "s" : ""} sold — see list`, `${base}?start=buyers_${eventId}`);
+  }
   return kb;
 }
-
 function buildRsvpStatusLine(
   counts: { going: number; maybe: number; no: number },
   ticketCount: number,
@@ -682,8 +755,8 @@ async function sendOrgPreviewCard(event: EventData): Promise<void> {
   const lang     = await getUserLang(event.organizerTelegramId);
   const intro    = tStatic(lang, "eventLive");
   const cardText = buildPreviewCardText(event);
-  const counts   = await loadRsvpCounts(event.id);
-  const keyboard = rsvpKeyboardForCounts(event.id, counts);
+  const [counts, ticketData] = await Promise.all([loadRsvpCounts(event.id), loadTicketBuyers(event.id)]);
+  const keyboard = rsvpKeyboardForCounts(event.id, counts, ticketData.count);
 
   try {
     await bot.api.sendMessage(event.organizerTelegramId, intro, { parse_mode: "Markdown" });
@@ -703,6 +776,38 @@ async function sendOrgPreviewCard(event: EventData): Promise<void> {
 }
 
 // ── Dispatch notifications ─────────────────────────────────────────────────────
+// ── Notify organiser of a new deep-link RSVP ──────────────────────────────────
+
+async function notifyOrganiserRsvp(
+  eventId: number,
+  status: "going" | "maybe",
+  counts: { going: number; maybe: number; no: number },
+  ticketData: { count: number; buyers: TicketBuyer[] },
+): Promise<void> {
+  let organizerTelegramId: string | undefined;
+  try {
+    const [ev] = await db.select({ organizerId: events.organizerId }).from(events).where(eq(events.id, eventId));
+    if (ev?.organizerId) {
+      const [org] = await db.select({ telegramId: users.telegramId }).from(users).where(eq(users.id, ev.organizerId));
+      organizerTelegramId = org?.telegramId ?? undefined;
+    }
+  } catch { /* non-fatal */ }
+
+  if (!organizerTelegramId) return;
+
+  const action  = status === "going" ? "✅ Someone marked YES" : "🤔 Someone marked Interested";
+  const footer  = buildRsvpStatusFooter(counts, ticketData);
+  const msgText = `${action} — event #${eventId}${footer}`;
+
+  try {
+    await bot.api.sendMessage(organizerTelegramId, msgText, { parse_mode: "Markdown" });
+  } catch (err: any) {
+    if (err?.error_code === 403) await markUserBlocked(organizerTelegramId);
+    else console.warn("[bot] notifyOrganiserRsvp failed:", err?.message);
+  }
+}
+
+
 export async function dispatchEventNotifications(
   event: EventData,
 ): Promise<{ sent: number; inApp: number }> {
@@ -774,7 +879,7 @@ export async function dispatchEventNotifications(
     const text     = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.venueAddress, desc, event.id);
     const footer  = buildRsvpStatusFooter(counts, { count: 0, buyers: [] });
     const msgText = footer ? text + footer : text;
-    const keyboard = rsvpKeyboardForCounts(event.id, counts);
+    const keyboard = rsvpKeyboardForCounts(event.id, counts, 0);
 
     enqueueNotification({ userId: user.id, telegramId: user.telegramId, text: msgText, imageUrl: event.imageUrl, keyboard, lang });
     alreadyNotified.add(user.telegramId);
@@ -906,7 +1011,7 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   if (!msg) return;
 
   // Build the refreshed keyboard with live counts
-  const newKeyboard = rsvpKeyboardForCounts(eventId, newCounts);
+  const newKeyboard = rsvpKeyboardForCounts(eventId, newCounts, ticketData.count);
 
   // Build the status footer to append/replace at end of message
   const statusFooter = buildRsvpStatusFooter(newCounts, ticketData, newStatus);
@@ -1088,7 +1193,7 @@ bot.command("testnotify", async (ctx) => {
   await ctx.reply("🧪 Sending test notification directly to you…");
 
   const counts   = await loadRsvpCounts(testEvent.id);
-  const keyboard = rsvpKeyboardForCounts(testEvent.id, counts);
+  const keyboard = rsvpKeyboardForCounts(testEvent.id, counts, 0);
   const text     = buildPreviewCardText(testEvent);
 
   try {
