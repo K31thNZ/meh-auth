@@ -177,8 +177,39 @@ async function markUserUnblocked(telegramId: string): Promise<void> {
   } catch { /* non-fatal */ }
 }
 
-// ── In-memory dedup ────────────────────────────────────────────────────────────
-const notifiedForEvent = new Map<number, Set<string>>();
+// ── In-memory dedup — with TTL to prevent unbounded memory growth ─────────────
+//
+// Each entry records which Telegram IDs were notified for a given event.
+// Entries are automatically evicted after DEDUP_TTL_MS (12 hours) so the Map
+// can't grow indefinitely on a long-running server.
+//
+// MAX_DEDUP_EVENTS caps how many distinct events we track at once. When the
+// cap is hit, the oldest entry is evicted (LRU-style via Map insertion order).
+
+const DEDUP_TTL_MS    = 12 * 60 * 60 * 1000;  // 12 hours
+const MAX_DEDUP_EVENTS = 200;
+
+interface DedupEntry {
+  notified:  Set<string>;
+  createdAt: number;       // Date.now() when the entry was first created
+}
+
+const notifiedForEvent = new Map<number, DedupEntry>();
+
+/** Remove entries older than DEDUP_TTL_MS or beyond MAX_DEDUP_EVENTS cap. */
+function pruneDedup(): void {
+  const now = Date.now();
+  for (const [eventId, entry] of notifiedForEvent) {
+    if (now - entry.createdAt > DEDUP_TTL_MS) {
+      notifiedForEvent.delete(eventId);
+    }
+  }
+  // LRU eviction: if still over cap, remove oldest (Map preserves insertion order)
+  while (notifiedForEvent.size > MAX_DEDUP_EVENTS) {
+    const oldestKey = notifiedForEvent.keys().next().value;
+    if (oldestKey !== undefined) notifiedForEvent.delete(oldestKey);
+  }
+}
 
 function clearNotifiedForEvent(eventId: number): void {
   notifiedForEvent.delete(eventId);
@@ -832,10 +863,13 @@ export async function dispatchEventNotifications(
     return { sent: 0, inApp: 0 };
   }
 
+  // Prune stale entries before reading/writing dedup state
+  pruneDedup();
+
   if (!notifiedForEvent.has(event.id)) {
-    notifiedForEvent.set(event.id, new Set());
+    notifiedForEvent.set(event.id, { notified: new Set(), createdAt: Date.now() });
   }
-  const alreadyNotified = notifiedForEvent.get(event.id)!;
+  const alreadyNotified = notifiedForEvent.get(event.id)!.notified;
 
   const icon    = CATEGORY_ICONS[event.category] ?? "📌";
   const dateStr = safeMoscowStr(event.date);
