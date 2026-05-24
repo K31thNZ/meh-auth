@@ -13,7 +13,7 @@ import { promisify } from "util";
 import { storage } from "./storage";
 import { runIncrementalMatcher } from "./matcher";
 import { sendToUser } from "./bot";
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { db } from "./db";
 import { telegramLinkTokens } from "@shared/schema";
 
@@ -111,7 +111,7 @@ export function setupPassport() {
           email,
         });
         return done(null, user);
-      } catch (err) { return done(err as Error); }
+      } catch (err) { return done(String(err), undefined as any); }
     }));
   }
 }
@@ -143,8 +143,8 @@ export function registerAuthRoutes(app: Express) {
   // ── Local login ───────────────────────────────────────────────────────────
   app.post("/api/auth/login",
     passport.authenticate("local", { failWithError: true }),
-    (req, res) => res.json(sanitize(req.user as any)),
-    (err: any, req: any, res: any, next: any) => {
+    (req: Request, res: Response) => res.json(sanitize(req.user as any)),
+    (err: any, req: Request, res: Response, _next: NextFunction) => {
       res.status(401).json({ error: "Incorrect username or password" });
     }
   );
