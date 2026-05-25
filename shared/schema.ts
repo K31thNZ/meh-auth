@@ -145,8 +145,32 @@ export const events = pgTable("events", {
   description: text("description"),
   organizerId: integer("organizer_id").references(() => users.id, { onDelete: "set null" }),
   imageUrl:    text("image_url"),
-  dispatched:  boolean("dispatched").notNull().default(true),
+  dispatched:      boolean("dispatched").notNull().default(true),
+  notificationsSent: integer("notifications_sent").notNull().default(0),
+  rsvpMomentum24h:   integer("rsvp_momentum_24h").notNull().default(0),   // RSVPs in last 24h
   createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ── Demand signal suppression (per organiser) ────────────────────────────────
+// When an organiser taps "Ignore this slot" on a demand signal, we record it
+// here and skip sending them that category+day+hour combination for 14 days.
+export const ignoredDemandSlots = pgTable("ignored_demand_slots", {
+  id:         serial("id").primaryKey(),
+  userId:     integer("user_id").references(() => users.id, { onDelete: "cascade" }).notNull(),
+  category:   text("category").notNull(),
+  day:        integer("day").notNull(),      // 0=Sun … 6=Sat
+  hour:       integer("hour").notNull(),
+  expiresAt:  timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt:  timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ── RSVP debounce buffer (per event) ─────────────────────────────────────────
+// Tracks batched RSVP counts waiting to be flushed to the organiser.
+export const rsvpFlushBuffer = pgTable("rsvp_flush_buffer", {
+  eventId:       integer("event_id").primaryKey(),
+  pendingCount:  integer("pending_count").notNull().default(0),
+  firstPendingAt: timestamp("first_pending_at", { withTimezone: true }).notNull(),
+  lastPendingAt:  timestamp("last_pending_at",  { withTimezone: true }).notNull(),
 });
 
 // ── Relations ────────────────────────────────────────────────────────────────

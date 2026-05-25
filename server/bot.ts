@@ -557,71 +557,9 @@ async function resolveOrganiserUserId(telegramId: string): Promise<number | null
   return user?.id ?? null;
 }
 
-// ── /myevents ─────────────────────────────────────────────────────────────────
+// ── /myevents — upgraded version defined in insights section below ──────────────
 
-bot.command("myevents", async (ctx) => {
-  const userId = await resolveOrganiserUserId(String(ctx.from!.id));
-  if (!userId) {
-    await ctx.reply("Your account is not linked. Visit expatevents.org → Settings → Connect Telegram.");
-    return;
-  }
-  const rows = await db.select().from(events).where(eq(events.organizerId, Number(userId)));
-  if (rows.length === 0) {
-    await ctx.reply("You have no events yet.");
-    return;
-  }
-  for (const e of rows) {
-    const [counts, ticketData] = await Promise.all([
-      loadRsvpCounts(e.id),
-      loadTicketBuyers(e.id),
-    ]);
-    const footer = buildRsvpStatusFooter(counts, ticketData);
-    await ctx.reply(
-      `*${e.title}*\n📅 ${safeMoscowStr(e.date)}${footer}\n\n` +
-      `/attendees_${e.id}   /reshare_${e.id}   /edit_${e.id}`,
-      { parse_mode: "Markdown" },
-    );
-  }
-});
-
-// ── /attendees_{id} ────────────────────────────────────────────────────────────
-
-bot.hears(/^\/attendees_(\d+)$/, async (ctx) => {
-  const eventId = parseInt(ctx.match[1]);
-  const [attendees, ticketData] = await Promise.all([
-    getEventAttendees(eventId),
-    loadTicketBuyers(eventId),
-  ]);
-
-  const lines: string[] = [`*Attendees — event #${eventId}*`];
-
-  // ── RSVP section ──
-  if (attendees.length === 0) {
-    lines.push("\n_No RSVPs yet._");
-  } else {
-    lines.push("");
-    for (const a of attendees) {
-      const emoji = a.status === "going" ? "✅" : a.status === "maybe" ? "🤔" : "❌";
-      const name  = a.username ? `@${a.username}` : a.telegramId ?? String(a.userId);
-      const from  = a.sourceChatTitle ? ` _(${a.sourceChatTitle})_` : "";
-      lines.push(`${emoji} ${name}${from}`);
-    }
-  }
-
-  // ── Ticket buyers section ──
-  if (ticketData.count > 0) {
-    lines.push("");
-    lines.push(`🎟 *${ticketData.count} ticket buyer${ticketData.count !== 1 ? "s" : ""}:*`);
-    for (const b of ticketData.buyers) {
-      const name = b.username ? `@${b.username}` : b.attendeeName;
-      lines.push(`  • ${name}`);
-    }
-  } else {
-    lines.push("\n_No ticket purchases yet._");
-  }
-
-  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
-});
+// ── /attendees — upgraded with summary + broadcast, defined in insights section ──
 
 // ── /edit_{id} ────────────────────────────────────────────────────────────────
 
@@ -650,26 +588,7 @@ bot.hears(/^\/reshare_(\d+)$/, async (ctx) => {
   }
 });
 
-// ── Demand signal ──────────────────────────────────────────────────────────────
-
-export async function notifyOrganiserDemand(organiserId: number, match: {
-  category: string; day: number; hour: number; userCount: number;
-}): Promise<void> {
-  const [organiser] = await db.select().from(users).where(eq(users.id, organiserId));
-  if (!organiser?.telegramId) return;
-
-  const icon      = CATEGORY_ICONS[match.category] ?? "📌";
-  const lang      = userLang(organiser);
-  const text      = tStatic(lang, "demandSignal", match.userCount, DAYS[match.day], fmtHour(match.hour), getCategoryLabel(match.category));
-  const createUrl = `https://expatevents.org/create-event?category=${match.category}&day=${match.day}&hour=${match.hour}`;
-  const keyboard  = new InlineKeyboard().url("✨ Create event", createUrl);
-
-  try {
-    await bot.api.sendMessage(organiser.telegramId, `${icon} ${text}`, { parse_mode: "Markdown", reply_markup: keyboard });
-  } catch (err: any) {
-    if (err?.error_code === 403) await markUserBlocked(organiser.telegramId);
-  }
-}
+// ── Demand signal — see upgraded notifyOrganiserDemand below ──────────────────
 
 // ── RSVP keyboard ──────────────────────────────────────────────────────────────
 
@@ -806,37 +725,7 @@ async function sendOrgPreviewCard(event: EventData): Promise<void> {
   }
 }
 
-// ── Dispatch notifications ─────────────────────────────────────────────────────
-// ── Notify organiser of a new deep-link RSVP ──────────────────────────────────
-
-async function notifyOrganiserRsvp(
-  eventId: number,
-  status: "going" | "maybe",
-  counts: { going: number; maybe: number; no: number },
-  ticketData: { count: number; buyers: TicketBuyer[] },
-): Promise<void> {
-  let organizerTelegramId: string | undefined;
-  try {
-    const [ev] = await db.select({ organizerId: events.organizerId }).from(events).where(eq(events.id, eventId));
-    if (ev?.organizerId) {
-      const [org] = await db.select({ telegramId: users.telegramId }).from(users).where(eq(users.id, ev.organizerId));
-      organizerTelegramId = org?.telegramId ?? undefined;
-    }
-  } catch { /* non-fatal */ }
-
-  if (!organizerTelegramId) return;
-
-  const action  = status === "going" ? "✅ Someone marked YES" : "🤔 Someone marked Interested";
-  const footer  = buildRsvpStatusFooter(counts, ticketData);
-  const msgText = `${action} — event #${eventId}${footer}`;
-
-  try {
-    await bot.api.sendMessage(organizerTelegramId, msgText, { parse_mode: "Markdown" });
-  } catch (err: any) {
-    if (err?.error_code === 403) await markUserBlocked(organizerTelegramId);
-    else console.warn("[bot] notifyOrganiserRsvp failed:", err?.message);
-  }
-}
+// ── Dispatch notifications — notifyOrganiserRsvp is now debounced, defined below ──
 
 
 export async function dispatchEventNotifications(
@@ -922,6 +811,9 @@ export async function dispatchEventNotifications(
   }
 
   await saveEvent(event);
+  if (sent > 0) {
+    recordNotificationsSent(event.id, sent).catch(() => {});
+  }
 
   console.log(`[bot] dispatchEventNotifications DONE — event ${event.id}: ${inApp} in-app, ${sent} Telegram queued`);
   return { sent, inApp };
@@ -1273,42 +1165,750 @@ bot.command("findevents", async (ctx) => {
   }
 });
 
-bot.command("stats", async (ctx) => {
-  if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
-  const [evtCount]  = await db.select({ count: sql<number>`count(*)` }).from(events);
-  const [userCount] = await db.select({ count: sql<number>`count(*)` }).from(users);
-  const [tgCount]   = await db.select({ count: sql<number>`count(*)` }).from(users).where(isNotNull(users.telegramId));
-  const [intCount]  = await db.select({ count: sql<number>`count(*)` }).from(users)
-    .where(sql`array_length(${users.interests}, 1) > 0`);
+// ── /stats — upgraded version defined in insights section below ─────────────────
+
+
+
+// ── Compatibility exports (upgraded) ─────────────────────────────────────────
+
+export async function notifyAdminAvailabilityMatch(_match: any): Promise<void> {
+  // No-op — sendMatchReport handles everything in one batched digest.
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ── 1. ADMIN MATCH REPORT — structured digest grouped by category ─────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface MatchEntry {
+  category:  string;
+  day:       number;
+  hour:      number;
+  userCount: number;
+  userIds:   number[];
+}
+
+function barChart(n: number, max: number, width = 8): string {
+  const filled = max > 0 ? Math.round((n / max) * width) : 0;
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+export async function sendMatchReport(matches: MatchEntry[]): Promise<void> {
+  if (!ADMIN_TELEGRAM_ID || matches.length === 0) return;
+
+  // ── Group by category, pick the top slot per category ──────────────────
+  const byCategory = new Map<string, MatchEntry[]>();
+  for (const m of matches) {
+    if (!byCategory.has(m.category)) byCategory.set(m.category, []);
+    byCategory.get(m.category)!.push(m);
+  }
+
+  // Sort categories by total users descending
+  const sortedCats = [...byCategory.entries()]
+    .map(([cat, ms]) => ({
+      cat,
+      topSlot: ms.sort((a, b) => b.userCount - a.userCount)[0],
+      total:   ms.reduce((s, m) => s + m.userCount, 0),
+      slots:   ms.sort((a, b) => b.userCount - a.userCount),
+    }))
+    .sort((a, b) => b.total - a.total);
+
+  const maxTotal = sortedCats[0]?.total ?? 1;
+
+  // ── Global top slot ────────────────────────────────────────────────────
+  const topSlotMap = new Map<string, number>();
+  for (const m of matches) {
+    const key = `${DAYS[m.day]} ${fmtHour(m.hour)}`;
+    topSlotMap.set(key, (topSlotMap.get(key) ?? 0) + m.userCount);
+  }
+  const topSlotEntry = [...topSlotMap.entries()].sort((a, b) => b[1] - a[1])[0];
+
+  // ── Build digest text ──────────────────────────────────────────────────
+  const now = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Moscow", weekday: "short", day: "numeric", month: "short",
+  }).format(new Date());
+
+  const lines: string[] = [
+    `📊 *Availability Digest — ${now}*\n`,
+    `_${matches.length} active slot${matches.length !== 1 ? "s" : ""} across ${sortedCats.length} categor${sortedCats.length !== 1 ? "ies" : "y"}_\n`,
+  ];
+
+  for (const { cat, topSlot, total, slots } of sortedCats.slice(0, 8)) {
+    const icon      = CATEGORY_ICONS[cat] ?? "📌";
+    const bar       = barChart(total, maxTotal);
+    const topSlotStr = `${DAYS[topSlot.day]} ${fmtHour(topSlot.hour)}`;
+    const extraSlots = slots.length > 1
+      ? ` +${slots.length - 1} slot${slots.length > 2 ? "s" : ""}`
+      : "";
+    lines.push(`${icon} *${getCategoryLabel(cat)}*  \`${bar}\`  ${total} people`);
+    lines.push(`  📅 ${topSlotStr} (${topSlot.userCount} available)${extraSlots}`);
+  }
+
+  if (topSlotEntry) {
+    lines.push(`\n🏆 *Hottest slot:* ${topSlotEntry[0]} — ${topSlotEntry[1]} people across categories`);
+  }
+
+  lines.push(`\n_Tap a demand button to nudge organisers:_`);
+
+  // ── Inline keyboard: top 3 categories ────────────────────────────────
+  const keyboard = new InlineKeyboard();
+  for (const { cat, topSlot } of sortedCats.slice(0, 3)) {
+    const icon = CATEGORY_ICONS[cat] ?? "📌";
+    keyboard.text(
+      `${icon} Nudge ${getCategoryLabel(cat)} organiser`,
+      `demand_nudge:${cat}:${topSlot.day}:${topSlot.hour}:${topSlot.userCount}`,
+    ).row();
+  }
+
+  try {
+    await bot.api.sendMessage(ADMIN_TELEGRAM_ID, lines.join("\n"), {
+      parse_mode:   "Markdown",
+      reply_markup: keyboard,
+    });
+  } catch (err: any) {
+    console.error("[bot] sendMatchReport failed:", err?.message);
+  }
+}
+
+// ── Callback: demand_nudge (admin triggers organiser demand signal) ────────────
+bot.callbackQuery(/^demand_nudge:([^:]+):(\d+):(\d+):(\d+)$/, async (ctx) => {
+  if (String(ctx.from.id) !== ADMIN_TELEGRAM_ID) {
+    await ctx.answerCallbackQuery({ text: "Admin only." });
+    return;
+  }
+  await ctx.answerCallbackQuery({ text: "Sending demand signal…" });
+
+  const category  = ctx.match[1];
+  const day       = parseInt(ctx.match[2]);
+  const hour      = parseInt(ctx.match[3]);
+  const userCount = parseInt(ctx.match[4]);
+
+  // Find organisers who have hosted events in this category
+  const { db: botDb } = await import("./db");
+  const { users: usersT, events: eventsT } = await import("@shared/schema");
+  const { inArray: inArrayFn, eq: eqFn } = await import("drizzle-orm");
+
+  const categoryEvents = await botDb
+    .select({ organizerId: eventsT.organizerId })
+    .from(eventsT)
+    .where(eqFn(eventsT.category, category));
+
+  const orgIds = [...new Set(categoryEvents.map(e => e.organizerId).filter(Boolean))] as number[];
+
+  if (orgIds.length === 0) {
+    await ctx.reply(`No organisers found for category "${getCategoryLabel(category)}". Signal not sent.`);
+    return;
+  }
+
+  let sent = 0;
+  for (const orgId of orgIds) {
+    try {
+      await notifyOrganiserDemandRich(orgId, { category, day, hour, userCount });
+      sent++;
+    } catch { /* continue */ }
+  }
+
+  await ctx.reply(`✅ Demand signal sent to ${sent} organiser${sent !== 1 ? "s" : ""} for ${getCategoryLabel(category)}.`);
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ── 2. RICH ORGANISER DEMAND SIGNAL ──────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+export async function notifyOrganiserDemand(organiserId: number, match: {
+  category: string; day: number; hour: number; userCount: number;
+}): Promise<void> {
+  return notifyOrganiserDemandRich(organiserId, match);
+}
+
+async function notifyOrganiserDemandRich(organiserId: number, match: {
+  category: string; day: number; hour: number; userCount: number;
+}): Promise<void> {
+  const [organiser] = await db.select().from(users).where(eq(users.id, organiserId));
+  if (!organiser?.telegramId) return;
+
+  // Check ignore list — skip if organiser suppressed this slot within 14 days
+  const { ignoredDemandSlots } = await import("@shared/schema");
+  const { and: andFn, eq: eqFn, gte: gteFn } = await import("drizzle-orm");
+  const [ignored] = await db
+    .select({ id: ignoredDemandSlots.id })
+    .from(ignoredDemandSlots)
+    .where(andFn(
+      eqFn(ignoredDemandSlots.userId,   organiserId),
+      eqFn(ignoredDemandSlots.category, match.category),
+      eqFn(ignoredDemandSlots.day,      match.day),
+      eqFn(ignoredDemandSlots.hour,     match.hour),
+      gteFn(ignoredDemandSlots.expiresAt, new Date()),
+    ));
+  if (ignored) {
+    console.log(`[bot] Demand signal suppressed for organiser ${organiserId} (ignored slot)`);
+    return;
+  }
+
+  // Gather profile breakdown of the waiting users
+  const matchingProfiles = await db
+    .select({
+      nativeLanguage: users.nativeLanguage,
+      city:           users.city,
+      myAgeGroup:     users.myAgeGroup,
+    })
+    .from(users)
+    .where(sql`${match.category} = ANY(${users.interests})`);
+
+  // Language breakdown (top 3)
+  const langCount = new Map<string, number>();
+  for (const p of matchingProfiles) {
+    if (p.nativeLanguage) langCount.set(p.nativeLanguage, (langCount.get(p.nativeLanguage) ?? 0) + 1);
+  }
+  const topLangs = [...langCount.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([code, n]) => {
+      const lang = LANGUAGES_SIMPLE.find(l => l.code === code);
+      return `${lang?.flag ?? "🌐"} ${lang?.label ?? code} ×${n}`;
+    });
+
+  // City breakdown (top 3)
+  const cityCount = new Map<string, number>();
+  for (const p of matchingProfiles) {
+    if (p.city) cityCount.set(p.city, (cityCount.get(p.city) ?? 0) + 1);
+  }
+  const topCities = [...cityCount.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([city, n]) => `${city} ×${n}`);
+
+  // Age breakdown
+  const ageCount = new Map<string, number>();
+  for (const p of matchingProfiles) {
+    if (p.myAgeGroup) ageCount.set(p.myAgeGroup, (ageCount.get(p.myAgeGroup) ?? 0) + 1);
+  }
+  const topAges = [...ageCount.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([ag, n]) => `${ag}yrs ×${n}`);
+
+  // How many times this slot has appeared in the last 4 weeks
+  const { availabilityMatches } = await import("@shared/schema");
+  const recurrenceRows = await db
+    .select({ id: availabilityMatches.id })
+    .from(availabilityMatches)
+    .where(andFn(
+      eqFn(availabilityMatches.category, match.category),
+      eqFn(availabilityMatches.day,      match.day),
+      eqFn(availabilityMatches.hour,     match.hour),
+    ));
+  const recurrenceCount = recurrenceRows.length;
+
+  // Last event in this category
+  const [lastEvent] = await db
+    .select({ title: events.title, createdAt: events.createdAt })
+    .from(events)
+    .where(eqFn(events.category, match.category))
+    .orderBy(sql`${events.createdAt} DESC`)
+    .limit(1);
+
+  const icon       = CATEGORY_ICONS[match.category] ?? "📌";
+  const catLabel   = getCategoryLabel(match.category);
+  const slotStr    = `${DAYS[match.day]} ${fmtHour(match.hour)}`;
+  const createUrl  = `https://expatevents.org/create-event?category=${match.category}&day=${match.day}&hour=${match.hour}`;
+  const ignoreKey  = `ignore_demand:${organiserId}:${match.category}:${match.day}:${match.hour}`;
+
+  const lines: string[] = [
+    `${icon} *${match.userCount} people want a ${catLabel} event*`,
+    `📅 *${slotStr}*\n`,
+  ];
+
+  if (topLangs.length)  lines.push(`🌍 Languages: ${topLangs.join(", ")}`);
+  if (topCities.length) lines.push(`📍 Cities: ${topCities.join(", ")}`);
+  if (topAges.length)   lines.push(`👥 Ages: ${topAges.join(", ")}`);
+  lines.push("");
+
+  if (recurrenceCount > 1) {
+    lines.push(`🔁 This slot has shown demand *${recurrenceCount} times* in recent reports.`);
+  }
+  if (lastEvent) {
+    const when = safeMoscowStr(lastEvent.createdAt!);
+    lines.push(`📅 Last ${catLabel} event: _${lastEvent.title}_ (${when})`);
+  }
+
+  const keyboard = new InlineKeyboard()
+    .url("✨ Create event for this slot", createUrl)
+    .row()
+    .text("🔕 Ignore this slot for 2 weeks", ignoreKey);
+
+  const lang = userLang(organiser);
+  try {
+    await bot.api.sendMessage(
+      organiser.telegramId,
+      lines.join("\n"),
+      { parse_mode: "Markdown", reply_markup: keyboard },
+    );
+  } catch (err: any) {
+    if (err?.error_code === 403) await markUserBlocked(organiser.telegramId);
+  }
+}
+
+// Simple language lookup for demand signal profile breakdown
+const LANGUAGES_SIMPLE: { code: string; label: string; flag: string }[] = [
+  { code: "en", label: "English", flag: "🇬🇧" },
+  { code: "ru", label: "Russian", flag: "🇷🇺" },
+  { code: "de", label: "German",  flag: "🇩🇪" },
+  { code: "fr", label: "French",  flag: "🇫🇷" },
+  { code: "es", label: "Spanish", flag: "🇪🇸" },
+  { code: "it", label: "Italian", flag: "🇮🇹" },
+  { code: "pt", label: "Portuguese", flag: "🇵🇹" },
+  { code: "zh", label: "Chinese", flag: "🇨🇳" },
+  { code: "ja", label: "Japanese", flag: "🇯🇵" },
+  { code: "ar", label: "Arabic",  flag: "🇸🇦" },
+  { code: "tr", label: "Turkish", flag: "🇹🇷" },
+  { code: "ko", label: "Korean",  flag: "🇰🇷" },
+  { code: "hi", label: "Hindi",   flag: "🇮🇳" },
+  { code: "uk", label: "Ukrainian", flag: "🇺🇦" },
+  { code: "pl", label: "Polish",  flag: "🇵🇱" },
+];
+
+// ── Callback: organiser ignores a demand slot ──────────────────────────────────
+bot.callbackQuery(/^ignore_demand:(\d+):([^:]+):(\d+):(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Slot ignored for 2 weeks." });
+  const userId   = parseInt(ctx.match[1]);
+  const category = ctx.match[2];
+  const day      = parseInt(ctx.match[3]);
+  const hour     = parseInt(ctx.match[4]);
+
+  const { ignoredDemandSlots } = await import("@shared/schema");
+  const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  try {
+    await db.insert(ignoredDemandSlots).values({ userId, category, day, hour, expiresAt })
+      .onConflictDoNothing();
+  } catch { /* non-fatal */ }
+
+  const msg = ctx.callbackQuery.message;
+  if (msg && "text" in msg) {
+    await ctx.api.editMessageText(
+      msg.chat.id, msg.message_id,
+      (msg as any).text + "\n\n🔕 _You won't be reminded about this slot for 2 weeks._",
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard() },
+    ).catch(() => {});
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ── 3. /myevents — per-event momentum + conversion stats ─────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+bot.command("myevents", async (ctx) => {
+  const userId = await resolveOrganiserUserId(String(ctx.from!.id));
+  if (!userId) {
+    await ctx.reply("Your account is not linked. Visit expatevents.org → Settings → Connect Telegram.");
+    return;
+  }
+  const myEvents = await db.select().from(events).where(eq(events.organizerId, userId));
+  if (myEvents.length === 0) {
+    await ctx.reply("You have no events yet.");
+    return;
+  }
+  for (const e of myEvents) {
+    const [counts, ticketData] = await Promise.all([
+      loadRsvpCounts(e.id),
+      loadTicketBuyers(e.id),
+    ]);
+
+    const totalRsvps = counts.going + counts.maybe;
+    const notifSent  = (e as any).notificationsSent ?? 0;
+    const momentum   = (e as any).rsvpMomentum24h ?? 0;
+    const conversion = notifSent > 0 ? Math.round((totalRsvps / notifSent) * 100) : null;
+
+    const eventDate = new Date(e.date);
+    const daysAway  = Math.ceil((eventDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    const timeLabel = daysAway > 0 ? `${daysAway}d away` : daysAway === 0 ? "Today" : "Past";
+
+    const lines: string[] = [
+      `*${e.title}*`,
+      `📅 ${safeMoscowStr(e.date)} · _${timeLabel}_`,
+      ``,
+      `✅ ${counts.going} going  🤔 ${counts.maybe} interested  🎟 ${ticketData.count} tickets`,
+    ];
+
+    if (notifSent > 0) {
+      lines.push(`📣 ${notifSent} notified${conversion !== null ? `  →  ${conversion}% conversion` : ""}`);
+    }
+    if (momentum > 0) {
+      lines.push(`📈 +${momentum} RSVPs in the last 24h`);
+    } else if (totalRsvps > 0 && notifSent > 0) {
+      lines.push(`→ No new RSVPs in the last 24h`);
+    }
+
+    // Suggestion for low conversion
+    const goingRatio = notifSent > 0 ? counts.going / notifSent : 0;
+    if (counts.maybe >= 5 && counts.going < 2) {
+      lines.push(`\n💡 ${counts.maybe} people are Interested but not committed — try /nudge_${e.id} to message them`);
+    } else if (goingRatio < 0.05 && notifSent >= 20) {
+      lines.push(`\n💡 Low conversion — consider resharing at a different time via /reshare_${e.id}`);
+    }
+
+    lines.push(`\n/attendees_${e.id}   /reshare_${e.id}   /nudge_${e.id}`);
+
+    await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ── 4. RSVP DEBOUNCE — batch RSVP notifications to organiser ─────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+// In-memory debounce buffer: eventId → { count, timer }
+const rsvpFlushTimers = new Map<number, { count: number; timer: ReturnType<typeof setTimeout> }>();
+const RSVP_DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes
+const RSVP_MILESTONES  = new Set([1, 5, 10, 25, 50, 100]);
+
+async function notifyOrganiserRsvp(
+  eventId: number,
+  status: "going" | "maybe",
+  counts: { going: number; maybe: number; no: number },
+  ticketData: { count: number; buyers: TicketBuyer[] },
+): Promise<void> {
+  let organizerTelegramId: string | undefined;
+  try {
+    const [ev] = await db.select({ organizerId: events.organizerId }).from(events).where(eq(events.id, eventId));
+    if (ev?.organizerId) {
+      const [org] = await db.select({ telegramId: users.telegramId }).from(users).where(eq(users.id, ev.organizerId));
+      organizerTelegramId = org?.telegramId ?? undefined;
+    }
+  } catch { /* non-fatal */ }
+  if (!organizerTelegramId) return;
+
+  const totalRsvps = counts.going + counts.maybe;
+
+  // Always send immediately for the very first RSVP and for milestones
+  const isFirstRsvp  = totalRsvps === 1;
+  const isMilestone  = RSVP_MILESTONES.has(totalRsvps);
+
+  if (isFirstRsvp || isMilestone) {
+    // Flush any buffered count first, then send milestone message
+    const buffered = rsvpFlushTimers.get(eventId);
+    if (buffered) {
+      clearTimeout(buffered.timer);
+      rsvpFlushTimers.delete(eventId);
+    }
+
+    const emoji = isFirstRsvp ? "🎉" : "🚀";
+    const footer = buildRsvpStatusFooter(counts, ticketData);
+    const msg    = isFirstRsvp
+      ? `${emoji} *First RSVP!* — event #${eventId}${footer}`
+      : `${emoji} *${totalRsvps} RSVPs* — event #${eventId}${footer}`;
+
+    try {
+      await bot.api.sendMessage(organizerTelegramId, msg, { parse_mode: "Markdown" });
+    } catch (err: any) {
+      if (err?.error_code === 403) await markUserBlocked(organizerTelegramId);
+    }
+    return;
+  }
+
+  // Buffer all other RSVPs — flush after RSVP_DEBOUNCE_MS of silence
+  const existing = rsvpFlushTimers.get(eventId);
+  const newCount = (existing?.count ?? 0) + 1;
+  if (existing) clearTimeout(existing.timer);
+
+  const finalOrgTgId = organizerTelegramId; // capture for closure
+  const timer = setTimeout(async () => {
+    rsvpFlushTimers.delete(eventId);
+    const latestCounts    = await loadRsvpCounts(eventId);
+    const latestTickets   = await loadTicketBuyers(eventId);
+    const footer          = buildRsvpStatusFooter(latestCounts, latestTickets);
+    const msg             = `📬 *+${newCount} new RSVP${newCount !== 1 ? "s" : ""}* in the last 10 min — event #${eventId}${footer}`;
+    try {
+      await bot.api.sendMessage(finalOrgTgId, msg, { parse_mode: "Markdown" });
+    } catch (err: any) {
+      if (err?.error_code === 403) await markUserBlocked(finalOrgTgId);
+    }
+  }, RSVP_DEBOUNCE_MS);
+
+  rsvpFlushTimers.set(eventId, { count: newCount, timer });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ── 5. /attendees — summary header + broadcast button ────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+bot.hears(/^\/attendees_(\d+)$/, async (ctx) => {
+  const eventId = parseInt(ctx.match[1]);
+  const [ev, attendees, ticketData] = await Promise.all([
+    db.select().from(events).where(eq(events.id, eventId)).then(r => r[0]),
+    getEventAttendees(eventId),
+    loadTicketBuyers(eventId),
+  ]);
+
+  const going    = attendees.filter(a => a.status === "going");
+  const maybe    = attendees.filter(a => a.status === "maybe");
+  const notifSent = (ev as any)?.notificationsSent ?? 0;
+  const eventDate = ev ? new Date(ev.date) : null;
+  const daysAway  = eventDate
+    ? Math.ceil((eventDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+    : null;
+
+  const lines: string[] = [
+    `📋 *${ev?.title ?? `Event #${eventId}`}*`,
+    `📅 ${ev ? safeMoscowStr(ev.date) : "—"}${daysAway !== null ? `  ·  _${daysAway > 0 ? `${daysAway}d away` : daysAway === 0 ? "Today!" : "Past"}_` : ""}`,
+    ``,
+    `✅ Going:      *${going.length}*`,
+    `🤔 Interested: *${maybe.length}*`,
+    `🎟 Tickets:    *${ticketData.count}*`,
+  ];
+
+  if (notifSent > 0) {
+    const totalRsvp  = going.length + maybe.length;
+    const conversion = Math.round((totalRsvp / notifSent) * 100);
+    lines.push(`📣 Reach:      *${notifSent}* notified  →  *${conversion}%* conversion`);
+  }
+
+  lines.push(``);
+
+  // ── Going list ────────────────────────────────────────────────────────
+  if (going.length === 0) {
+    lines.push(`_No confirmed attendees yet._`);
+  } else {
+    lines.push(`*Going (${going.length}):*`);
+    for (const a of going) {
+      const name  = a.username ? `@${a.username}` : a.telegramId ?? String(a.userId);
+      const from  = a.sourceChatTitle ? ` _(${a.sourceChatTitle})_` : "";
+      lines.push(`  ✅ ${name}${from}`);
+    }
+  }
+
+  // ── Interested list ───────────────────────────────────────────────────
+  if (maybe.length > 0) {
+    lines.push(`\n*Interested (${maybe.length}):*`);
+    for (const a of maybe) {
+      const name = a.username ? `@${a.username}` : a.telegramId ?? String(a.userId);
+      lines.push(`  🤔 ${name}`);
+    }
+  }
+
+  // ── Ticket buyers ─────────────────────────────────────────────────────
+  if (ticketData.count > 0) {
+    lines.push(`\n*🎟 Ticket buyers (${ticketData.count}):*`);
+    for (const b of ticketData.buyers) {
+      const name = b.username ? `@${b.username}` : b.attendeeName;
+      lines.push(`  • ${name}`);
+    }
+  }
+
+  // Broadcast keyboard
+  const keyboard = new InlineKeyboard();
+  if (going.length > 0) {
+    keyboard.text(`📤 Message all Going (${going.length})`, `broadcast_going:${eventId}`).row();
+  }
+  if (maybe.length > 0) {
+    keyboard.text(`📤 Message Interested (${maybe.length})`, `broadcast_maybe:${eventId}`).row();
+  }
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown", reply_markup: keyboard.inline_keyboard.length ? keyboard : undefined });
+});
+
+// ── Callback: broadcast to Going / Interested ──────────────────────────────────
+bot.callbackQuery(/^broadcast_(going|maybe):(\d+)$/, async (ctx) => {
+  const group   = ctx.match[1] as "going" | "maybe";
+  const eventId = parseInt(ctx.match[2]);
+
+  // Must be the organiser of this event
+  const callerId = await resolveOrganiserUserId(String(ctx.from.id));
+  if (!callerId) {
+    await ctx.answerCallbackQuery({ text: "Link your account first.", show_alert: true });
+    return;
+  }
+  const [ev] = await db.select({ organizerId: events.organizerId, title: events.title }).from(events).where(eq(events.id, eventId));
+  if (!ev || ev.organizerId !== callerId) {
+    await ctx.answerCallbackQuery({ text: "You are not the organiser of this event.", show_alert: true });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Enter your broadcast message in the next message." });
+
+  // Store pending broadcast state in session
+  ctx.session.editingEventId = eventId;
+  ctx.session.awaitingField  = `broadcast_${group}`;
+
   await ctx.reply(
-    `📊 *Stats*\n` +
-    `Users total: ${userCount.count}\n` +
-    `With Telegram: ${tgCount.count}\n` +
-    `With interests set: ${intCount.count}\n` +
-    `Events cached: ${evtCount.count}\n` +
-    `Queue depth: ${notificationQueue.length}\n` +
-    `RSVPs: stored in ExpatEvents DB`,
+    `📝 Send the message you want to broadcast to all *${group === "going" ? "Going" : "Interested"}* attendees of *${ev.title}*.\n\n_Reply with your message text:_`,
     { parse_mode: "Markdown" },
   );
 });
 
-// ── Compatibility exports ──────────────────────────────────────────────────────
+// ── Catch broadcast reply (session-based) ────────────────────────────────────
+bot.on("message:text", async (ctx) => {
+  const field = ctx.session.awaitingField ?? "";
+  const eventId = ctx.session.editingEventId;
 
-export async function notifyAdminAvailabilityMatch(_match: any): Promise<void> {
-  // Suppressed — batched report handles this.
-}
+  if (field.startsWith("broadcast_") && eventId) {
+    ctx.session.awaitingField  = undefined;
+    ctx.session.editingEventId = undefined;
 
-export async function sendMatchReport(matches: any[]): Promise<void> {
-  if (!ADMIN_TELEGRAM_ID || matches.length === 0) return;
-  try {
-    await bot.api.sendMessage(
-      ADMIN_TELEGRAM_ID,
-      `📊 *Availability match report*\n${matches.length} new time-slot match${matches.length !== 1 ? "es" : ""} found.`,
-      { parse_mode: "Markdown" },
-    );
-  } catch (err: any) {
-    console.error("[bot] sendMatchReport failed:", err?.message);
+    const group = field.replace("broadcast_", "") as "going" | "maybe";
+    const msgText = ctx.message.text;
+    const attendees = await getEventAttendees(eventId);
+    const targets   = attendees.filter(a => a.status === group && a.telegramId);
+
+    if (targets.length === 0) {
+      await ctx.reply("No attendees with Telegram linked in that group.");
+      return;
+    }
+
+    let sent = 0;
+    const [ev] = await db.select({ title: events.title }).from(events).where(eq(events.id, eventId));
+    for (const a of targets) {
+      try {
+        await bot.api.sendMessage(
+          a.telegramId!,
+          `📢 *Message from the organiser of "${ev?.title ?? `Event #${eventId}`}":*\n\n${msgText}`,
+          { parse_mode: "Markdown" },
+        );
+        sent++;
+        await new Promise(r => setTimeout(r, 60)); // rate-limit
+      } catch { /* skip blocked users */ }
+    }
+
+    await ctx.reply(`✅ Broadcast sent to *${sent}* attendee${sent !== 1 ? "s" : ""}.`, { parse_mode: "Markdown" });
+    return;
   }
+
+  // ── Existing edit flow (keep as-is) ──────────────────────────────────────
+  if (field && eventId) {
+    const updateData: Record<string, any> = {};
+    if (field === "title")        updateData.title       = ctx.message.text;
+    if (field === "description")  updateData.description = ctx.message.text;
+    if (!Object.keys(updateData).length) return;
+
+    await db.update(events).set(updateData).where(eq(events.id, eventId));
+    ctx.session.awaitingField  = undefined;
+    ctx.session.editingEventId = undefined;
+    await ctx.reply(`✅ *${field}* updated.`, { parse_mode: "Markdown" });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ── 6. /stats — full admin weekly snapshot ────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+bot.command("stats", async (ctx) => {
+  if (String(ctx.from!.id) !== ADMIN_TELEGRAM_ID) return;
+
+  const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  const [
+    [evtCount],
+    [newEvtCount],
+    [userCount],
+    [newUserCount],
+    [tgCount],
+    [intCount],
+    [langCount],
+  ] = await Promise.all([
+    db.select({ count: sql<number>`count(*)` }).from(events),
+    db.select({ count: sql<number>`count(*)` }).from(events)
+      .where(sql`${events.createdAt} > ${oneWeekAgo}`),
+    db.select({ count: sql<number>`count(*)` }).from(users),
+    db.select({ count: sql<number>`count(*)` }).from(users)
+      .where(sql`${users.createdAt} > ${oneWeekAgo}`),
+    db.select({ count: sql<number>`count(*)` }).from(users).where(isNotNull(users.telegramId)),
+    db.select({ count: sql<number>`count(*)` }).from(users)
+      .where(sql`array_length(${users.interests}, 1) > 0`),
+    db.select({ count: sql<number>`count(*)` }).from(users)
+      .where(isNotNull(users.nativeLanguage)),
+  ]);
+
+  // Notifications sent this week
+  const [notifsThisWeek] = await db
+    .select({ total: sql<number>`coalesce(sum(notifications_sent), 0)` })
+    .from(events)
+    .where(sql`${events.createdAt} > ${oneWeekAgo}`);
+
+  // Top category by notification count
+  const topCatRows = await db
+    .select({
+      category: events.category,
+      total: sql<number>`coalesce(sum(notifications_sent), 0)`,
+    })
+    .from(events)
+    .groupBy(events.category)
+    .orderBy(sql`sum(notifications_sent) DESC`)
+    .limit(3);
+
+  const topCatsStr = topCatRows
+    .filter(r => r.total > 0)
+    .map(r => `${CATEGORY_ICONS[r.category] ?? "📌"} ${getCategoryLabel(r.category)} (${r.total} notified)`)
+    .join("\n  ");
+
+  // Queue depth
+  const qDepth = notificationQueue.length;
+
+  const lines = [
+    `📈 *ExpatEvents — weekly snapshot*\n`,
+    `👥 Users: *${userCount.count}* total, *+${newUserCount.count}* this week`,
+    `🔔 Telegram linked: *${tgCount.count}*`,
+    `🎯 Interests set: *${intCount.count}*`,
+    `🌍 Language profiles: *${langCount.count}*`,
+    ``,
+    `📅 Events: *${evtCount.count}* total, *+${newEvtCount.count}* this week`,
+    `📣 Notifications sent (7d): *${notifsThisWeek?.total ?? 0}*`,
+    ``,
+    topCatRows.length > 0 ? `🏆 Top categories:\n  ${topCatsStr}` : "",
+    ``,
+    `⚡️ Queue depth now: *${qDepth}*`,
+    ``,
+    `_Data from meh-auth DB. RSVPs stored in ExpatEvents DB._`,
+  ].filter(l => l !== undefined);
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+});
+
+// ── /nudge_{id} — message all Interested attendees ────────────────────────────
+bot.hears(/^\/nudge_(\d+)$/, async (ctx) => {
+  const eventId = parseInt(ctx.match[1]);
+  const userId  = await resolveOrganiserUserId(String(ctx.from!.id));
+  if (!userId) { await ctx.reply("Account not linked."); return; }
+
+  const [ev] = await db.select().from(events).where(eq(events.id, eventId));
+  if (!ev || ev.organizerId !== userId) {
+    await ctx.reply("You are not the organiser of this event.");
+    return;
+  }
+
+  const attendees = await getEventAttendees(eventId);
+  const maybe     = attendees.filter(a => a.status === "maybe" && a.telegramId);
+  if (maybe.length === 0) {
+    await ctx.reply("No Interested attendees with Telegram linked yet.");
+    return;
+  }
+
+  const eventUrl = `https://expatevents.org/events/${eventId}`;
+  const [counts, ticketData] = await Promise.all([loadRsvpCounts(eventId), loadTicketBuyers(eventId)]);
+  const keyboard = rsvpKeyboardForCounts(eventId, counts, ticketData.count);
+
+  let sent = 0;
+  for (const a of maybe) {
+    try {
+      await bot.api.sendMessage(
+        a.telegramId!,
+        `👋 *${ev.title}* is coming up!\n\nYou marked yourself as *Interested* — have you made up your mind? Grab your spot now 👇`,
+        { parse_mode: "Markdown", reply_markup: keyboard },
+      );
+      sent++;
+      await new Promise(r => setTimeout(r, 60));
+    } catch { /* skip blocked */ }
+  }
+
+  await ctx.reply(`✅ Nudge sent to *${sent}* interested attendee${sent !== 1 ? "s" : ""}.`, { parse_mode: "Markdown" });
+});
+
+// ── Track notifications_sent on dispatchEventNotifications ────────────────────
+// Patch the saveEvent call to also record notification count.
+// This is called at the end of dispatchEventNotifications.
+export async function recordNotificationsSent(eventId: number, count: number): Promise<void> {
+  try {
+    await db.update(events).set({ notificationsSent: sql`notifications_sent + ${count}` } as any)
+      .where(eq(events.id, eventId));
+  } catch { /* non-fatal */ }
 }
 
 export async function sendToUser(telegramId: string, text: string): Promise<boolean> {
@@ -1331,7 +1931,6 @@ async function startBot(): Promise<void> {
 
   const webhookUrl = process.env.WEBHOOK_URL;
 
-  // grammY needs bot.init() to load bot info before handling updates
   await bot.init();
   console.log(`[bot] Bot @${bot.botInfo.username} initialised`);
 
@@ -1341,7 +1940,6 @@ async function startBot(): Promise<void> {
     console.log(`[bot] Webhook set → ${webhookUrl}/telegram`);
   } else {
     console.log("[bot] Starting polling mode");
-    // bot.start() also calls init(), but we already did – it will be ignored
     bot.start({
       onStart: (info) => console.log(`[bot] @${info.username} polling`),
     });
