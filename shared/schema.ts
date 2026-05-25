@@ -39,6 +39,12 @@ export const users = pgTable("users", {
   nativeLanguage:    text("native_language"),
   learningLanguages: jsonb("learning_languages").$type<LanguageEntry[]>().notNull().default(sql`'[]'::jsonb`),
   metroStation:      text("metro_station"),
+  bio:               text("bio"),
+  city:              text("city"),
+  meetingTypes:      text("meeting_types").array().default(sql`'{}'`),
+  myAgeGroup:        text("my_age_group"),
+  preferredAgeMin:   integer("preferred_age_min").notNull().default(0),
+  preferredAgeMax:   integer("preferred_age_max").notNull().default(3),
 
   // ── Bot‑related flags ─────────────────────────────────────────────────────
   blocked:         boolean("blocked").notNull().default(false),

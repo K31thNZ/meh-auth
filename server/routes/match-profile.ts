@@ -58,6 +58,12 @@ router.get("/match-profile", requireAuth, async (req: Request, res: Response) =>
         nativeLanguage:    users.nativeLanguage,
         learningLanguages: users.learningLanguages,
         metroStation:      users.metroStation,
+        bio:               users.bio,
+        city:              users.city,
+        meetingTypes:      users.meetingTypes,
+        myAgeGroup:        users.myAgeGroup,
+        preferredAgeMin:   users.preferredAgeMin,
+        preferredAgeMax:   users.preferredAgeMax,
       })
       .from(users)
       .where(eq(users.id, userId));
@@ -68,6 +74,12 @@ router.get("/match-profile", requireAuth, async (req: Request, res: Response) =>
       nativeLanguage:    row.nativeLanguage    ?? null,
       learningLanguages: row.learningLanguages ?? [],
       metroStation:      row.metroStation      ?? null,
+      bio:               row.bio               ?? null,
+      city:              row.city              ?? null,
+      meetingTypes:      row.meetingTypes      ?? [],
+      myAgeGroup:        row.myAgeGroup        ?? null,
+      preferredAgeMin:   row.preferredAgeMin   ?? 0,
+      preferredAgeMax:   row.preferredAgeMax   ?? 3,
     });
   } catch (err) {
     console.error("[match-profile] GET error:", err);
@@ -80,13 +92,19 @@ router.get("/match-profile", requireAuth, async (req: Request, res: Response) =>
 router.patch("/match-profile", requireAuth, async (req: Request, res: Response) => {
   try {
     const userId = (req.user as { id: number }).id;
-    const { nativeLanguage, learningLanguages, metroStation } = req.body;
+    const { nativeLanguage, learningLanguages, metroStation, bio, city, meetingTypes, myAgeGroup, preferredAgeMin, preferredAgeMax } = req.body;
 
     // Build only the fields the client sent — undefined fields are left unchanged
     const patch: Partial<{
       nativeLanguage:    string | null;
       learningLanguages: LanguageEntry[];
       metroStation:      string | null;
+      bio:               string | null;
+      city:              string | null;
+      meetingTypes:      string[];
+      myAgeGroup:        string | null;
+      preferredAgeMin:   number;
+      preferredAgeMax:   number;
     }> = {};
 
     // --- nativeLanguage ---
@@ -137,6 +155,70 @@ router.patch("/match-profile", requireAuth, async (req: Request, res: Response) 
       } else {
         patch.metroStation = metroStation.trim();
       }
+    }
+
+    // --- bio ---
+    if (bio !== undefined) {
+      if (bio === null || bio === "") {
+        patch.bio = null;
+      } else if (typeof bio !== "string" || bio.length > 280) {
+        return res.status(400).json({ error: "Bio must be 280 characters or fewer" });
+      } else {
+        patch.bio = bio.trim();
+      }
+    }
+
+    // --- city ---
+    if (city !== undefined) {
+      if (city === null || city === "") {
+        patch.city = null;
+      } else if (typeof city !== "string" || city.length > 100) {
+        return res.status(400).json({ error: "City must be 100 characters or fewer" });
+      } else {
+        patch.city = city.trim();
+      }
+    }
+
+    // --- meetingTypes ---
+    if (meetingTypes !== undefined) {
+      const VALID_MEETING_TYPES = new Set(["1on1", "small_group", "social"]);
+      if (!Array.isArray(meetingTypes)) {
+        return res.status(400).json({ error: "meetingTypes must be an array" });
+      }
+      for (const t of meetingTypes) {
+        if (!VALID_MEETING_TYPES.has(t)) {
+          return res.status(400).json({ error: `Invalid meeting type: ${t}` });
+        }
+      }
+      patch.meetingTypes = meetingTypes;
+    }
+
+    // --- myAgeGroup ---
+    const VALID_AGE_GROUPS = new Set(["18-25", "26-35", "36-45", "46+"]);
+    if (myAgeGroup !== undefined) {
+      if (myAgeGroup === null || myAgeGroup === "") {
+        patch.myAgeGroup = null;
+      } else if (!VALID_AGE_GROUPS.has(myAgeGroup)) {
+        return res.status(400).json({ error: `Invalid age group: ${myAgeGroup}` });
+      } else {
+        patch.myAgeGroup = myAgeGroup;
+      }
+    }
+
+    // --- preferredAgeMin / preferredAgeMax ---
+    if (preferredAgeMin !== undefined) {
+      const v = Number(preferredAgeMin);
+      if (!Number.isInteger(v) || v < 0 || v > 3) {
+        return res.status(400).json({ error: "preferredAgeMin must be 0–3" });
+      }
+      patch.preferredAgeMin = v;
+    }
+    if (preferredAgeMax !== undefined) {
+      const v = Number(preferredAgeMax);
+      if (!Number.isInteger(v) || v < 0 || v > 3) {
+        return res.status(400).json({ error: "preferredAgeMax must be 0–3" });
+      }
+      patch.preferredAgeMax = v;
     }
 
     // Nothing to update

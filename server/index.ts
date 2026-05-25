@@ -5,6 +5,7 @@ import { bot } from "./bot";               // grammy bot instance (auto-started)
 import { scheduleMatcher } from "./matcher";
 import { registerNotifyRoutes } from "./notify-routes";
 import matchProfileRouter from "./routes/match-profile";
+import languageExchangeRouter from "./routes/language-exchange";
 import express from "express";
 import cors from "cors";
 import session from "express-session";
@@ -589,6 +590,7 @@ registerMagicCodeRoutes(app);
 registerNotifyRoutes(app);
 registerTelegramLinkRoutes(app);
 app.use("/api/user", matchProfileRouter);
+app.use("/api/language-exchange", languageExchangeRouter);
 
 // ── Shared auth helper ─────────────────────────────────────────────────────
 const VALID_ROLES = ["free", "premium", "host", "curator", "admin"];
