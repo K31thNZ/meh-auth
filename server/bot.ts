@@ -268,6 +268,9 @@ async function loadTicketBuyers(eventId: number): Promise<{ count: number; buyer
   return { count: 0, buyers: [] };
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ⚠️  FIXED: setRsvpStatus now throws on failure so callers can react
+// ══════════════════════════════════════════════════════════════════════════════
 async function setRsvpStatus(
   mehAuthUserId: number,
   eventId: number,
@@ -275,30 +278,27 @@ async function setRsvpStatus(
   sourceChatId?: number,
   sourceChatTitle?: string,
 ): Promise<RsvpCounts> {
-  try {
-    const res = await fetchWithTimeout(
-      `${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Bot-Secret": EXPAT_API_SECRET,
-        },
-        body: JSON.stringify({ userId: mehAuthUserId, status, sourceChatId, sourceChatTitle }),
+  const res = await fetchWithTimeout(
+    `${EXPAT_API_URL}/api/bot/events/${eventId}/rsvp`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bot-Secret": EXPAT_API_SECRET,
       },
-    );
-    if (res.ok) {
-      const data = await res.json();
-      return {
-        going: data.counts?.going ?? 0,
-        maybe: data.counts?.maybe ?? 0,
-        no:    data.counts?.no    ?? 0,
-      };
-    }
-  } catch (err: any) {
-    console.error(`[bot] setRsvpStatus failed:`, err?.message);
+      body: JSON.stringify({ userId: mehAuthUserId, status, sourceChatId, sourceChatTitle }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`RSVP API ${res.status}: ${text}`);
   }
-  return { going: 0, maybe: 0, no: 0 };
+  const data = await res.json();
+  return {
+    going: data.counts?.going ?? 0,
+    maybe: data.counts?.maybe ?? 0,
+    no:    data.counts?.no    ?? 0,
+  };
 }
 
 async function getEventAttendees(eventId: number): Promise<Attendee[]> {
@@ -480,22 +480,28 @@ bot.command("start", async (ctx) => {
       return;
     }
 
-    // Record RSVP
-    const [counts, ticketData] = await Promise.all([
-      setRsvpStatus(existingUser.id, eventId, status, 0, undefined),
-      loadTicketBuyers(eventId),
-    ]);
+    // ════════════════════════════════════════════════════════════════════════
+    // ⚠️  FIXED: Wrap RSVP with try/catch to surface failures
+    // ════════════════════════════════════════════════════════════════════════
+    try {
+      const [counts, ticketData] = await Promise.all([
+        setRsvpStatus(existingUser.id, eventId, status, 0, undefined),
+        loadTicketBuyers(eventId),
+      ]);
 
-    const label  = status === "going" ? "✅ You're going!" : "🤔 You're marked as interested!";
-    const footer = buildRsvpStatusFooter(counts, ticketData, status);
-    const eventUrl = `https://expatevents.org/events/${eventId}`;
-    await ctx.reply(
-      `${label}${footer}\n\n[View event & purchase tickets →](${eventUrl})`,
-      { parse_mode: "Markdown" },
-    );
+      const label  = status === "going" ? "✅ You're going!" : "🤔 You're marked as interested!";
+      const footer = buildRsvpStatusFooter(counts, ticketData, status);
+      const eventUrl = `https://expatevents.org/events/${eventId}`;
+      await ctx.reply(
+        `${label}${footer}\n\n[View event & purchase tickets →](${eventUrl})`,
+        { parse_mode: "Markdown" },
+      );
 
-    // Notify the organiser (non-blocking)
-    notifyOrganiserRsvp(eventId, status, counts, ticketData).catch(() => {});
+      // Notify the organiser (non-blocking)
+      notifyOrganiserRsvp(eventId, status, counts, ticketData).catch(() => {});
+    } catch {
+      await ctx.reply("❌ Sorry, we couldn’t save your RSVP. Please try again later.");
+    }
     return;
   }
 
@@ -927,11 +933,23 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   const sourceChatId    = chat?.id ?? 0;
   const sourceChatTitle = chat && "title" in chat ? (chat as any).title : undefined;
 
-  // Persist the RSVP in ExpatEvents
-  const [newCounts, ticketData] = await Promise.all([
-    setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle),
-    loadTicketBuyers(eventId),
-  ]);
+  // ════════════════════════════════════════════════════════════════════════
+  // ⚠️  FIXED: Wrap RSVP with try/catch so we can show an error to the user
+  // ════════════════════════════════════════════════════════════════════════
+  let newCounts: RsvpCounts;
+  let ticketData: { count: number; buyers: TicketBuyer[] };
+  try {
+    const [countsResult, ticketResult] = await Promise.all([
+      setRsvpStatus(user.id, eventId, newStatus, sourceChatId, sourceChatTitle),
+      loadTicketBuyers(eventId),
+    ]);
+    newCounts = countsResult;
+    ticketData = ticketResult;
+  } catch (err) {
+    console.error(`[bot] RSVP callback failed:`, (err as Error).message);
+    await ctx.answerCallbackQuery({ text: "❌ Failed to save your RSVP. Please try again.", show_alert: true });
+    return;
+  }
 
   const msg = ctx.callbackQuery.message;
   if (!msg) return;
@@ -942,7 +960,7 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
   // Build the status footer to append/replace at end of message
   const statusFooter = buildRsvpStatusFooter(newCounts, ticketData, newStatus);
 
-  // Strip any old status footer (lines starting with ✅/🤔/🎟/_Your RSVP) from existing text
+  // Strip any old status footer from existing text
   const existingText = "text" in msg ? (msg.text ?? "") : ("caption" in msg ? ((msg as any).caption ?? "") : "");
   const baseText = stripRsvpFooter(existingText);
   const updatedText = baseText + statusFooter;
@@ -961,7 +979,6 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
       });
     }
   } catch (err: any) {
-    // "message not modified" is benign — Telegram throws if content didn't change
     if (!err?.message?.includes("not modified")) {
       console.error(`[bot] Failed to edit RSVP message: ${err?.message}`);
     }
