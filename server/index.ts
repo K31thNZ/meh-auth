@@ -2,7 +2,7 @@
 import { registerTelegramLinkRoutes } from "./telegram-link";
 import { registerMagicCodeRoutes } from "./magic-code";
 import { bot } from "./bot";               // grammy bot instance (auto-started)
-import { scheduleMatcher } from "./matcher";
+import { scheduleMatcher, runAvailabilityMatcher } from "./matcher";
 import { registerNotifyRoutes } from "./notify-routes";
 import matchProfileRouter from "./routes/match-profile";
 import languageExchangeRouter from "./routes/language-exchange";
@@ -781,5 +781,20 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[meh-auth] Running on port ${PORT} (${process.env.NODE_ENV ?? "development"})`);
   console.log(`[meh-auth] Cookie domain: ${process.env.COOKIE_DOMAIN ?? "not set"}`);
   console.log(`[meh-auth] Allowed origins: ${process.env.ALLOWED_ORIGINS ?? "none set"}`);
+
+// ── POST /api/admin/trigger-match-digest ──────────────────────────────────
+// Dev/admin tool: manually fire the full availability matcher + digest.
+app.post("/api/admin/trigger-match-digest", async (req: any, res: any) => {
+  const secret = req.headers["x-admin-secret"];
+  if (secret !== process.env.ADMIN_SECRET && secret !== "dev-trigger") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  res.json({ ok: true, message: "Match digest triggered — check Telegram." });
+  // Run async so response returns immediately
+  runAvailabilityMatcher().catch(err =>
+    console.error("[trigger] runAvailabilityMatcher error:", err)
+  );
+});
+
   scheduleMatcher();
 });
