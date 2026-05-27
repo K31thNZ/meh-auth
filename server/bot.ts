@@ -1195,61 +1195,117 @@ function barChart(n: number, max: number, width = 8): string {
 export async function sendMatchReport(matches: MatchEntry[]): Promise<void> {
   if (!ADMIN_TELEGRAM_ID || matches.length === 0) return;
 
-  // ── Group by category, pick the top slot per category ──────────────────
+  // ── Bulk-fetch profiles for all user IDs referenced in matches ─────────
+  const allUserIds = [...new Set(matches.flatMap(m => m.userIds))];
+  let profileMap = new Map<number, { nativeLanguage: string | null; city: string | null; myAgeGroup: string | null }>();
+  try {
+    const { inArray: inArr } = await import("drizzle-orm");
+    const profiles = await db
+      .select({ id: users.id, nativeLanguage: users.nativeLanguage, city: users.city, myAgeGroup: users.myAgeGroup })
+      .from(users)
+      .where(allUserIds.length > 0 ? inArr(users.id, allUserIds) : sql`false`);
+    for (const p of profiles) profileMap.set(p.id, p);
+  } catch (err: any) {
+    console.warn("[bot] sendMatchReport: could not fetch profiles:", err?.message);
+  }
+
+  // Helper: build top-3 breakdown for a set of userIds + a profile field
+  function topBreakdown(
+    uids: number[],
+    key: "nativeLanguage" | "city" | "myAgeGroup",
+    fmt: (val: string, n: number) => string,
+  ): string {
+    const counter = new Map<string, number>();
+    for (const id of uids) {
+      const val = profileMap.get(id)?.[key];
+      if (val) counter.set(val, (counter.get(val) ?? 0) + 1);
+    }
+    return [...counter.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([v, n]) => fmt(v, n))
+      .join(", ");
+  }
+
+  // ── Group by category ──────────────────────────────────────────────────
   const byCategory = new Map<string, MatchEntry[]>();
   for (const m of matches) {
     if (!byCategory.has(m.category)) byCategory.set(m.category, []);
     byCategory.get(m.category)!.push(m);
   }
 
-  // Sort categories by total users descending
+  // Sort categories by unique user count descending
   const sortedCats = [...byCategory.entries()]
-    .map(([cat, ms]) => ({
-      cat,
-      topSlot: ms.sort((a, b) => b.userCount - a.userCount)[0],
-      total:   ms.reduce((s, m) => s + m.userCount, 0),
-      slots:   ms.sort((a, b) => b.userCount - a.userCount),
-    }))
+    .map(([cat, ms]) => {
+      const sorted     = [...ms].sort((a, b) => b.userCount - a.userCount);
+      const allCatIds  = [...new Set(ms.flatMap(m => m.userIds))];
+      return { cat, topSlot: sorted[0], total: allCatIds.length, slots: sorted, allCatIds };
+    })
     .sort((a, b) => b.total - a.total);
 
   const maxTotal = sortedCats[0]?.total ?? 1;
 
   // ── Global top slot ────────────────────────────────────────────────────
-  const topSlotMap = new Map<string, number>();
+  const topSlotMap = new Map<string, { count: number; uids: number[] }>();
   for (const m of matches) {
     const key = `${DAYS[m.day]} ${fmtHour(m.hour)}`;
-    topSlotMap.set(key, (topSlotMap.get(key) ?? 0) + m.userCount);
+    const existing = topSlotMap.get(key);
+    if (existing) {
+      for (const uid of m.userIds) {
+        if (!existing.uids.includes(uid)) { existing.uids.push(uid); existing.count++; }
+      }
+    } else {
+      topSlotMap.set(key, { count: m.userIds.length, uids: [...m.userIds] });
+    }
   }
-  const topSlotEntry = [...topSlotMap.entries()].sort((a, b) => b[1] - a[1])[0];
+  const topSlotEntry = [...topSlotMap.entries()].sort((a, b) => b[1].count - a[1].count)[0];
 
-  // ── Build digest text ──────────────────────────────────────────────────
+  // ── Header ─────────────────────────────────────────────────────────────
   const now = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Moscow", weekday: "short", day: "numeric", month: "short",
   }).format(new Date());
 
+  const totalUniqueUsers = allUserIds.length;
+
   const lines: string[] = [
     `📊 *Availability Digest — ${now}*\n`,
-    `_${matches.length} active slot${matches.length !== 1 ? "s" : ""} across ${sortedCats.length} categor${sortedCats.length !== 1 ? "ies" : "y"}_\n`,
+    `_${totalUniqueUsers} user${totalUniqueUsers !== 1 ? "s" : ""} · ${matches.length} slot${matches.length !== 1 ? "s" : ""} · ${sortedCats.length} categor${sortedCats.length !== 1 ? "ies" : "y"}_\n`,
   ];
 
-  for (const { cat, topSlot, total, slots } of sortedCats.slice(0, 8)) {
-    const icon      = CATEGORY_ICONS[cat] ?? "📌";
-    const bar       = barChart(total, maxTotal);
+  // ── Per-category rows ─────────────────────────────────────────────────
+  for (const { cat, topSlot, total, slots, allCatIds } of sortedCats.slice(0, 8)) {
+    const icon       = CATEGORY_ICONS[cat] ?? "📌";
+    const bar        = barChart(total, maxTotal);
     const topSlotStr = `${DAYS[topSlot.day]} ${fmtHour(topSlot.hour)}`;
     const extraSlots = slots.length > 1
-      ? ` +${slots.length - 1} slot${slots.length > 2 ? "s" : ""}`
+      ? ` +${slots.length - 1} more slot${slots.length > 2 ? "s" : ""}`
       : "";
+
     lines.push(`${icon} *${getCategoryLabel(cat)}*  \`${bar}\`  ${total} people`);
     lines.push(`  📅 ${topSlotStr} (${topSlot.userCount} available)${extraSlots}`);
+
+    // Real profile data for this category's actual users
+    const langStr = topBreakdown(allCatIds, "nativeLanguage", (code, n) => {
+      const lang = LANGUAGES_SIMPLE.find(l => l.code === code);
+      return `${lang?.flag ?? "🌐"}${lang?.label ?? code}×${n}`;
+    });
+    const cityStr = topBreakdown(allCatIds, "city",           (city, n) => `${city}×${n}`);
+    const ageStr  = topBreakdown(allCatIds, "myAgeGroup",     (ag,   n) => `${ag}yr×${n}`);
+
+    const details: string[] = [];
+    if (langStr) details.push(`🌍 ${langStr}`);
+    if (cityStr) details.push(`📍 ${cityStr}`);
+    if (ageStr)  details.push(`👥 ${ageStr}`);
+    if (details.length) lines.push(`  ${details.join("  ")}`);
   }
 
   if (topSlotEntry) {
-    lines.push(`\n🏆 *Hottest slot:* ${topSlotEntry[0]} — ${topSlotEntry[1]} people across categories`);
+    lines.push(`\n🏆 *Hottest slot:* ${topSlotEntry[0]} — ${topSlotEntry[1].count} people across categories`);
   }
 
-  lines.push(`\n_Tap a demand button to nudge organisers:_`);
+  lines.push(`\n_Tap a button to nudge organisers in that category:_`);
 
-  // ── Inline keyboard: top 3 categories ────────────────────────────────
+  // ── Keyboard: top 3 categories ────────────────────────────────────────
   const keyboard = new InlineKeyboard();
   for (const { cat, topSlot } of sortedCats.slice(0, 3)) {
     const icon = CATEGORY_ICONS[cat] ?? "📌";
@@ -1268,6 +1324,7 @@ export async function sendMatchReport(matches: MatchEntry[]): Promise<void> {
     console.error("[bot] sendMatchReport failed:", err?.message);
   }
 }
+
 
 // ── Callback: demand_nudge (admin triggers organiser demand signal) ────────────
 bot.callbackQuery(/^demand_nudge:([^:]+):(\d+):(\d+):(\d+)$/, async (ctx) => {
