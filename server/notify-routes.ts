@@ -19,6 +19,7 @@ const notifyEventSchema = z.object({
   date:         z.coerce.date(),
   venueCity:    z.string(),
   venueAddress: z.string(),
+  locationName: z.string().optional().nullable(),
   description:  z.string(),
   organizerId:  z.number().optional(),   // new
   imageUrl:     z.string().url().optional(), // new
@@ -65,6 +66,7 @@ export function registerNotifyRoutes(app: Express) {
         date: raw.date,
         venueCity: raw.venueCity,
         venueAddress: raw.venueAddress,
+        locationName: raw.locationName,
         description: raw.description,
         organizerId: raw.organizerId ? String(raw.organizerId) : undefined,
         organizerTelegramId,

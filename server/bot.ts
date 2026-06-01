@@ -20,6 +20,7 @@ export interface EventData {
   date: Date;
   venueCity: string;
   venueAddress: string;
+  locationName?: string | null;
   description: string;
   organizerId?: string;
   imageUrl?: string;
@@ -696,7 +697,7 @@ function buildPreviewCardText(event: EventData): string {
   return (
     `${icon} *${event.title}*\n\n` +
     `📅 ${dateStr}\n` +
-    `📍 ${event.venueAddress}, ${event.venueCity}\n` +
+    `📍 ${event.locationName || event.venueAddress}, ${event.venueCity}\n` +
     `🏷 ${getCategoryLabel(event.category)}\n\n` +
     (desc ? `${desc}${(event.description ?? "").length > 180 ? "…" : ""}\n\n` : "") +
     `[View & register →](https://expatevents.org/events/${event.id})`
@@ -805,7 +806,7 @@ export async function dispatchEventNotifications(
     }
 
     const lang     = userLang(user);
-    const text     = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.venueAddress, desc, event.id);
+    const text     = tStatic(lang, "newEvent", icon, getCategoryLabel(event.category), event.title, dateStr, event.venueCity, event.locationName || event.venueAddress, desc, event.id);
     const footer  = buildRsvpStatusFooter(counts, { count: 0, buyers: [] });
     const msgText = footer ? text + footer : text;
     const keyboard = rsvpKeyboardForCounts(event.id, counts, 0);
@@ -861,7 +862,7 @@ export async function notifyMatchingUsers(
     `${icon} *New event — notification approval*\n\n` +
     `*${event.title}*\n` +
     `📅 ${dateStr}\n` +
-    `📍 ${event.venueAddress}, ${event.venueCity}\n` +
+    `📍 ${event.locationName || event.venueAddress}, ${event.venueCity}\n` +
     `🏷 ${getCategoryLabel(event.category)}\n\n` +
     `*${totalMatches.length}* users with this interest ` +
     `(${telegramMatches.length} with Telegram connected).\n\n` +

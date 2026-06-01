@@ -55,6 +55,15 @@ services:
       - key: TELEGRAM_BOT_NAME
         sync: false
 
+      # ExpatEvents API — must match the EXPAT_API_SECRET set on the Event-Hub service
+      # Used by the bot to authenticate RSVP / attendee calls to expatevents.org
+      - key: EXPAT_API_SECRET
+        sync: false
+
+      # Base URL of the Event-Hub API (defaults to https://expatevents.org)
+      - key: EXPAT_API_URL
+        value: https://expatevents.org
+
       # Apple — uncomment when credentials are ready
       # - key: APPLE_CLIENT_ID
       #   sync: false
