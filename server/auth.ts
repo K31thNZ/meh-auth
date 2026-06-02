@@ -53,7 +53,7 @@ export function setupPassport() {
     } catch (err) { return done(err); }
   }));
 
-  // ── Google ──────────────────────────────────────────────────────────────
+  // ── Google ───────────────────────────────────────────────────────────────
   if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     passport.use(new GoogleStrategy({
       clientID:     process.env.GOOGLE_CLIENT_ID,
@@ -84,7 +84,7 @@ export function setupPassport() {
     }));
   }
 
-  // ── Yandex ──────────────────────────────────────────────────────────────
+  // ── Yandex ───────────────────────────────────────────────────────────────
   if (process.env.YANDEX_CLIENT_ID && process.env.YANDEX_CLIENT_SECRET) {
     passport.use(new YandexStrategy({
       clientID:     process.env.YANDEX_CLIENT_ID,
@@ -111,9 +111,20 @@ export function setupPassport() {
           email,
         });
         return done(null, user);
-      } catch (err) { return done(String(err), undefined as any); }
+      } catch (err) { return done(err as Error); }
     }));
   }
+}
+
+// ── Middleware (defined before registerAuthRoutes to avoid ReferenceError) ──
+export function requireAuth(req: any, res: any, next: any) {
+  if (req.isAuthenticated()) return next();
+  res.status(401).json({ error: "Not authenticated" });
+}
+
+export function requireAdmin(req: any, res: any, next: any) {
+  if (req.isAuthenticated() && (req.user as any).role === "admin") return next();
+  res.status(403).json({ error: "Admins only" });
 }
 
 // ── Register all auth routes ───────────────────────────────────────────────
@@ -121,7 +132,7 @@ export function registerAuthRoutes(app: Express) {
   app.use(passport.initialize());
   app.use(passport.session());
 
-  // ── Current user ─────────────────────────────────────────────────────────
+  // ── Current user ──────────────────────────────────────────────────────────
   app.get("/api/user", (req, res) => {
     res.json(req.isAuthenticated() ? sanitize(req.user as any) : null);
   });
@@ -140,7 +151,7 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
-  // ── Local login ───────────────────────────────────────────────────────────
+  // ── Local login ────────────────────────────────────────────────────────────
   app.post("/api/auth/login",
     passport.authenticate("local", { failWithError: true }),
     (req: Request, res: Response) => res.json(sanitize(req.user as any)),
@@ -149,12 +160,12 @@ export function registerAuthRoutes(app: Express) {
     }
   );
 
-  // ── Logout ────────────────────────────────────────────────────────────────
+  // ── Logout ─────────────────────────────────────────────────────────────────
   app.post("/api/auth/logout", (req, res, next) => {
     req.logout(err => err ? next(err) : res.json({ ok: true }));
   });
 
-  // ── Google ────────────────────────────────────────────────────────────────
+  // ── Google ─────────────────────────────────────────────────────────────────
   app.get("/api/auth/google", (req, res, next) => {
     storeReturnTo(req);
     passport.authenticate("google", { scope: ["profile", "email"] })(req, res, next);
@@ -165,7 +176,7 @@ export function registerAuthRoutes(app: Express) {
     (req, res) => res.redirect(getReturnTo(req))
   );
 
-  // ── Yandex ────────────────────────────────────────────────────────────────
+  // ── Yandex ─────────────────────────────────────────────────────────────────
   app.get("/api/auth/yandex", (req, res, next) => {
     storeReturnTo(req);
     passport.authenticate("yandex")(req, res, next);
@@ -176,7 +187,7 @@ export function registerAuthRoutes(app: Express) {
     (req, res) => res.redirect(getReturnTo(req))
   );
 
-  // ── Telegram Login Widget ─────────────────────────────────────────────────
+  // ── Telegram Login Widget ──────────────────────────────────────────────────
   app.get("/api/auth/telegram", async (req, res, next) => {
     try {
       const data = req.query as Record<string, string>;
@@ -204,7 +215,7 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
-  // ── Telegram Mini App ────────────────────────────────────────────────────
+  // ── Telegram Mini App ──────────────────────────────────────────────────────
   app.post("/api/auth/telegram-miniapp", async (req, res, next) => {
     try {
       const { initData } = req.body;
@@ -344,7 +355,7 @@ export function registerAuthRoutes(app: Express) {
     res.json(await storage.getUserMatches((req.user as any).id));
   });
 
-  // ── Notifications ─────────────────────────────────────────────────────────
+  // ── Notifications ──────────────────────────────────────────────────────────
   app.get("/api/notifications", requireAuth, async (req, res) => {
     const appScope = req.query.app as string | undefined;
     res.json(await storage.getUserNotifications((req.user as any).id, appScope));
@@ -363,7 +374,7 @@ export function registerAuthRoutes(app: Express) {
     res.json({ count });
   });
 
-  // ── Host registry (public read) ───────────────────────────────────────────
+  // ── Host registry (public read) ────────────────────────────────────────────
   app.get("/api/hosts", async (_req, res) => {
     res.json(await storage.getApprovedHosts());
   });
@@ -374,7 +385,7 @@ export function registerAuthRoutes(app: Express) {
     res.json(host);
   });
 
-  // ── Host applications ─────────────────────────────────────────────────────
+  // ── Host applications ──────────────────────────────────────────────────────
   app.post("/api/host-applications", requireAuth, async (req, res, next) => {
     try {
       const existing = await storage.getHostBySlug(req.body.slug);
@@ -410,7 +421,7 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
-  // ── Telegram link token generation ───────────────────────────────────────────
+  // ── Telegram link token generation ────────────────────────────────────────
   // POST /api/telegram/link
   // Generates a one-time deep-link token for the Telegram bot to link accounts.
   app.post("/api/telegram/link", requireAuth, async (req: any, res, next) => {
@@ -430,7 +441,7 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
-  // ── Telegram unlink ───────────────────────────────────────────────────────────
+  // ── Telegram unlink ────────────────────────────────────────────────────────
   // POST /api/telegram/unlink
   app.post("/api/telegram/unlink", requireAuth, async (req: any, res, next) => {
     try {
@@ -440,17 +451,6 @@ export function registerAuthRoutes(app: Express) {
     } catch (err) { next(err); }
   });
 
-}
-
-// ── Middleware ─────────────────────────────────────────────────────────────
-export function requireAuth(req: any, res: any, next: any) {
-  if (req.isAuthenticated()) return next();
-  res.status(401).json({ error: "Not authenticated" });
-}
-
-export function requireAdmin(req: any, res: any, next: any) {
-  if (req.isAuthenticated() && (req.user as any).role === "admin") return next();
-  res.status(403).json({ error: "Admins only" });
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
