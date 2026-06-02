@@ -81,7 +81,10 @@ const LOCALE: Record<string, Record<string, any>> = {
     eventLive:     "🎉 *Ваше событие опубликовано!*\n\nВот карточка для форварда — люди могут RSVP прямо из Telegram.",
     stopped:       "🔕 Вы отписались от уведомлений ExpatEvents.\n\nОтправьте /start чтобы снова подписаться.",
     newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
-      `${icon} *Новое событие в категории ${cat}*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[Подробнее](https://expatevents.org/events/${id})`,
+      `${icon} *Новое событие в категории ${cat}*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[Подробнее →](https://expatevents.org/events/${id})\n` +
+      (BOT_USERNAME
+        ? `[✅ Иду](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_yes)  ·  [🤔 Интересно](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_interested)`
+        : `[RSVP →](https://expatevents.org/events/${id})`),
     demandSignal: (count: number, day: string, hour: string, cat: string) =>
       `*${count} экспатов* свободны в *${day} в ${hour}* и интересуются *${cat}*.\nПодумайте о проведении мероприятия!`,
   },
@@ -97,7 +100,10 @@ const LOCALE: Record<string, Record<string, any>> = {
     eventLive:     "🎉 *Your event is live!*\n\nHere's your shareable preview card. Forward it to any chat — people can RSVP directly from Telegram.",
     stopped:       "🔕 You've unsubscribed from ExpatEvents notifications.\n\nSend /start to resubscribe at any time.",
     newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
-      `${icon} *New ${cat} event*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[View event](https://expatevents.org/events/${id})`,
+      `${icon} *New ${cat} event*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[View event →](https://expatevents.org/events/${id})\n` +
+      (BOT_USERNAME
+        ? `[✅ I'm going](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_yes)  ·  [🤔 Interested](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_interested)`
+        : `[RSVP →](https://expatevents.org/events/${id})`),
     demandSignal: (count: number, day: string, hour: string, cat: string) =>
       `*${count} expats* are free on *${day} at ${hour}* and interested in *${cat}*.\nConsider hosting an event!`,
   },
@@ -500,8 +506,14 @@ bot.command("start", async (ctx) => {
 
       // Notify the organiser (non-blocking)
       notifyOrganiserRsvp(eventId, status, counts, ticketData).catch(() => {});
-    } catch {
-      await ctx.reply("❌ Sorry, we couldn’t save your RSVP. Please try again later.");
+    } catch (err: any) {
+      const detail = err?.message ?? "unknown error";
+      console.error(`[bot] RSVP deep-link failed: ${detail}`);
+      await ctx.reply(
+        `❌ Sorry, we couldn’t save your RSVP right now.\n\n`
+        + `You can also RSVP on the website: [View event →](https://expatevents.org/events/${eventId})`,
+        { parse_mode: "Markdown" },
+      );
     }
     return;
   }
@@ -684,8 +696,12 @@ function buildRsvpStatusFooter(
  * Footer always starts with a blank line followed by ✅/🤔/🎟/_you
  */
 function stripRsvpFooter(text: string): string {
-  // Remove everything from the last occurrence of \n\n(✅|🤔|🎟|_you) onwards
-  return text.replace(/\n\n(?:[✅🤔🎟]|_you)[\s\S]*$/, "").trimEnd();
+  // Remove the RSVP counts block (starts with a blank line then ✅/🤔/🎟/_you)
+  // AND the inline RSVP link line at the very end of the card
+  return text
+    .replace(/\n\n(?:[✅🤔🎟]|_you)[\s\S]*$/, "")
+    .replace(/\n\[✅[^\]]*\][\s\S]*$/, "")   // strips the [✅ I'm going]... line
+    .trimEnd();
 }
 
 // ── Preview card text ──────────────────────────────────────────────────────────
@@ -694,13 +710,20 @@ function buildPreviewCardText(event: EventData): string {
   const icon    = CATEGORY_ICONS[event.category] ?? "📌";
   const dateStr = safeMoscowStr(event.date);
   const desc    = (event.description ?? "").slice(0, 180);
+  // Embed RSVP deep-links directly in the card text so they survive message forwarding.
+  // Telegram strips inline keyboards on forward — in-text links do not get stripped.
+  const base = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}` : null;
+  const rsvpLine = base
+    ? `[✅ I'm going](${base}?start=rsvp_${event.id}_yes)  ·  [🤔 Interested](${base}?start=rsvp_${event.id}_interested)`
+    : `[View & RSVP →](https://expatevents.org/events/${event.id})`;
   return (
     `${icon} *${event.title}*\n\n` +
     `📅 ${dateStr}\n` +
     `📍 ${event.locationName || event.venueAddress}, ${event.venueCity}\n` +
     `🏷 ${getCategoryLabel(event.category)}\n\n` +
     (desc ? `${desc}${(event.description ?? "").length > 180 ? "…" : ""}\n\n` : "") +
-    `[View & register →](https://expatevents.org/events/${event.id})`
+    `[View event →](https://expatevents.org/events/${event.id})\n` +
+    rsvpLine
   );
 }
 
