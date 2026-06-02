@@ -39,7 +39,7 @@ export function setupPassport() {
     try {
       done(null, (await storage.getUser(id)) ?? false);
     } catch (err) {
-      done(err);
+      done(err, false);
     }
   });
 
@@ -50,7 +50,7 @@ export function setupPassport() {
       if (!user || !user.password) return done(null, false);
       if (!(await comparePasswords(password, user.password))) return done(null, false);
       return done(null, user);
-    } catch (err) { return done(err); }
+    } catch (err) { return done(err, false); }
   }));
 
   // ── Google ───────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ export function setupPassport() {
           email,
         });
         return done(null, user);
-      } catch (err) { return done(err as Error); }
+      } catch (err) { return done(err instanceof Error ? err.message : String(err), false as any); }
     }));
   }
 
@@ -111,7 +111,7 @@ export function setupPassport() {
           email,
         });
         return done(null, user);
-      } catch (err) { return done(err as Error); }
+      } catch (err) { return done(err instanceof Error ? err.message : String(err), false as any); }
     }));
   }
 }
