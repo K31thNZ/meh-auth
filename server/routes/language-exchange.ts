@@ -16,7 +16,7 @@
 import { Router, Request, Response } from "express";
 import { db } from "../db";
 import { users } from "@shared/schema";
-import { isNotNull, sql } from "drizzle-orm";
+import { isNotNull, sql, eq } from "drizzle-orm";
 
 const router = Router();
 
@@ -121,6 +121,145 @@ router.get("/users", async (req: Request, res: Response) => {
     return res.json({ data, total, limit, offset });
   } catch (err) {
     console.error("[language-exchange] GET /users error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+// ── POST /api/language-exchange/spark ────────────────────────────────────────
+// Logged-in user sends a language-exchange spark invitation to another user.
+// - Both parties receive a Telegram message if they have telegram_id set.
+// - Returns { ok: true, senderHasTelegram, recipientHasTelegram }
+
+router.post("/spark", async (req: Request, res: Response) => {
+  const currentUser = (req as any).user;
+  if (!currentUser) return res.status(401).json({ error: "Not authenticated" });
+
+  const { recipientId, availableTimes } = req.body as {
+    recipientId: number;
+    availableTimes?: string[];   // ISO strings of suggested slots (optional)
+  };
+
+  if (!recipientId || isNaN(Number(recipientId))) {
+    return res.status(400).json({ error: "recipientId required" });
+  }
+  if (currentUser.id === Number(recipientId)) {
+    return res.status(400).json({ error: "Cannot spark yourself" });
+  }
+
+  try {
+    // Fetch both users
+    const [sender, recipient] = await Promise.all([
+      db.select({
+        id: users.id, displayName: users.displayName, avatarUrl: users.avatarUrl,
+        city: users.city, nativeLanguage: users.nativeLanguage,
+        learningLanguages: users.learningLanguages, bio: users.bio,
+        telegramId: users.telegramId, telegramUsername: users.telegramUsername,
+        leHidden: users.leHidden, blocked: users.blocked,
+      }).from(users).where(eq(users.id, currentUser.id)).limit(1),
+
+      db.select({
+        id: users.id, displayName: users.displayName, avatarUrl: users.avatarUrl,
+        city: users.city, nativeLanguage: users.nativeLanguage,
+        learningLanguages: users.learningLanguages, bio: users.bio,
+        telegramId: users.telegramId, telegramUsername: users.telegramUsername,
+        leHidden: users.leHidden, blocked: users.blocked,
+      }).from(users).where(eq(users.id, Number(recipientId))).limit(1),
+    ]);
+
+    if (!sender[0]) return res.status(404).json({ error: "Sender not found" });
+    if (!recipient[0]) return res.status(404).json({ error: "Recipient not found" });
+    if (recipient[0].leHidden || recipient[0].blocked) {
+      return res.status(403).json({ error: "This profile is not available" });
+    }
+
+    const s = sender[0];
+    const r = recipient[0];
+
+    // ── Format a profile summary for the message ──────────────────────────
+    function profileSummary(u: typeof s): string {
+      const langs = [
+        u.nativeLanguage ? `🗣 Native: ${u.nativeLanguage}` : null,
+        Array.isArray(u.learningLanguages) && u.learningLanguages.length > 0
+          ? `📖 Learning: ${(u.learningLanguages as any[]).map((l: any) => l.code ?? l).join(", ")}`
+          : null,
+        u.city ? `📍 ${u.city}` : null,
+        u.bio ? `💬 "${u.bio}"` : null,
+      ].filter(Boolean);
+      return langs.join("\n");
+    }
+
+    // ── Format suggested times ─────────────────────────────────────────────
+    function formatTimes(slots?: string[]): string {
+      if (!slots || slots.length === 0) return "";
+      const formatted = slots.map(s => {
+        try {
+          return new Intl.DateTimeFormat("en-GB", {
+            weekday: "short", day: "numeric", month: "short",
+            hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow",
+          }).format(new Date(s));
+        } catch { return s; }
+      });
+      return "\n\n🕐 *Suggested times (Moscow):*\n" + formatted.map(t => `  • ${t}`).join("\n");
+    }
+
+    const timesStr = formatTimes(availableTimes);
+    const senderProfile  = profileSummary(s);
+    const botUsername = process.env.BOT_USERNAME ?? "expatevents_bot";
+
+    // ── Message to recipient ───────────────────────────────────────────────
+    const recipientMsg = [
+      `⚡ *Language Exchange Match!*`,
+      ``,
+      `*${s.displayName ?? "Someone"}* wants to practice languages with you!`,
+      ``,
+      senderProfile,
+      timesStr,
+      ``,
+      `${s.telegramUsername ? `💬 Reply to them: @${s.telegramUsername}` : `📲 [Open the app to connect](https://expatevents.org/language-exchange)`}`,
+      ``,
+      `_Tap to reply, or visit the Language Exchange directory._`,
+    ].filter(l => l !== undefined).join("\n");
+
+    // ── Message to sender (confirmation) ──────────────────────────────────
+    const senderConfirmMsg = [
+      `✅ *Spark sent to ${r.displayName ?? "your match"}!*`,
+      ``,
+      profileSummary(r),
+      timesStr,
+      ``,
+      r.telegramUsername
+        ? `💬 You can also message them directly: @${r.telegramUsername}`
+        : `_They haven't connected Telegram yet — we've notified them via the app._`,
+      ``,
+      `_Good luck with your language exchange! 🌍_`,
+    ].filter(l => l !== undefined).join("\n");
+
+    let senderHasTelegram   = false;
+    let recipientHasTelegram = false;
+
+    // ── Send Telegram messages ─────────────────────────────────────────────
+    const { sendToUser } = await import("../bot");
+
+    if (r.telegramId) {
+      recipientHasTelegram = true;
+      await sendToUser(r.telegramId, recipientMsg);
+    }
+
+    if (s.telegramId) {
+      senderHasTelegram = true;
+      await sendToUser(s.telegramId, senderConfirmMsg);
+    }
+
+    return res.json({
+      ok: true,
+      senderHasTelegram,
+      recipientHasTelegram,
+      recipientName: r.displayName ?? "your match",
+    });
+
+  } catch (err) {
+    console.error("[language-exchange] POST /spark error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

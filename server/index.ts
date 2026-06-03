@@ -1,7 +1,7 @@
 // server/index.ts
 import { registerTelegramLinkRoutes } from "./telegram-link";
 import { registerMagicCodeRoutes } from "./magic-code";
-import { bot } from "./bot";               // grammy bot instance (auto-started)
+import { bot, sendToUser } from "./bot";   // grammy bot instance (auto-started)
 import { scheduleMatcher, runAvailabilityMatcher } from "./matcher";
 import { registerNotifyRoutes } from "./notify-routes";
 import matchProfileRouter from "./routes/match-profile";
