@@ -80,11 +80,12 @@ const LOCALE: Record<string, Record<string, any>> = {
     cleared:       "Ответ удалён.",
     eventLive:     "🎉 *Ваше событие опубликовано!*\n\nВот карточка для форварда — люди могут RSVP прямо из Telegram.",
     stopped:       "🔕 Вы отписались от уведомлений ExpatEvents.\n\nОтправьте /start чтобы снова подписаться.",
-    newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
-      `${icon} *Новое событие в категории ${cat}*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[Подробнее →](https://expatevents.org/events/${id})\n` +
-      (BOT_USERNAME
-        ? `[✅ Иду](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_yes)  ·  [🤔 Интересно](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_interested)`
-        : `[RSVP →](https://expatevents.org/events/${id})`),
+    newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) => {
+      const miniAppUrl = BOT_USERNAME
+        ? `https://t.me/${BOT_USERNAME}/app?startapp=event_${id}`
+        : `https://expatevents.org/events/${id}`;
+      return `${icon} *Новое событие в категории ${cat}*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[👀 Подробнее & RSVP →](${miniAppUrl})`;
+    },
     demandSignal: (count: number, day: string, hour: string, cat: string) =>
       `*${count} экспатов* свободны в *${day} в ${hour}* и интересуются *${cat}*.\nПодумайте о проведении мероприятия!`,
   },
@@ -99,11 +100,12 @@ const LOCALE: Record<string, Record<string, any>> = {
     cleared:       "Response cleared.",
     eventLive:     "🎉 *Your event is live!*\n\nHere's your shareable preview card. Forward it to any chat — people can RSVP directly from Telegram.",
     stopped:       "🔕 You've unsubscribed from ExpatEvents notifications.\n\nSend /start to resubscribe at any time.",
-    newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) =>
-      `${icon} *New ${cat} event*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[View event →](https://expatevents.org/events/${id})\n` +
-      (BOT_USERNAME
-        ? `[✅ I'm going](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_yes)  ·  [🤔 Interested](https://t.me/${BOT_USERNAME}?start=rsvp_${id}_interested)`
-        : `[RSVP →](https://expatevents.org/events/${id})`),
+    newEvent: (icon: string, cat: string, title: string, dateStr: string, city: string, addr: string, desc: string, id: number) => {
+      const miniAppUrl = BOT_USERNAME
+        ? `https://t.me/${BOT_USERNAME}/app?startapp=event_${id}`
+        : `https://expatevents.org/events/${id}`;
+      return `${icon} *New ${cat} event*\n\n*${title}*\n📅 ${dateStr}\n📍 ${addr}, ${city}\n\n${desc}\n\n[👀 View event & RSVP →](${miniAppUrl})`;
+    },
     demandSignal: (count: number, day: string, hour: string, cat: string) =>
       `*${count} expats* are free on *${day} at ${hour}* and interested in *${cat}*.\nConsider hosting an event!`,
   },
@@ -616,18 +618,19 @@ function rsvpKeyboardForCounts(
   counts: { going: number; maybe: number; no: number },
   ticketCount?: number,
 ): InlineKeyboard {
-  // URL buttons survive message forwarding — deep-link into the bot.
-  if (!BOT_USERNAME) {
-    // Fallback: inline callback buttons (no forwarding support)
-    return new InlineKeyboard()
-      .text(`✅ Yes${counts.going   ? ` (${counts.going})`   : ""}`, `rsvp:going:${eventId}`)
-      .text(`🤔 Interested${counts.maybe ? ` (${counts.maybe})` : ""}`, `rsvp:maybe:${eventId}`);
-  }
-  const base = `https://t.me/${BOT_USERNAME}`;
+  // ── Keyboard shown on DIRECT messages (not forwarded) ─────────────────
+  // These buttons open the mini-app event page. The ✅/🤔 RSVP buttons
+  // are inside the mini-app — cleaner UX, no bot-chat redirect.
+  const miniAppUrl = BOT_USERNAME
+    ? `https://t.me/${BOT_USERNAME}/app?startapp=event_${eventId}`
+    : `https://expatevents.org/events/${eventId}`;
+
   const kb = new InlineKeyboard()
-    .url(`✅ Yes${counts.going     ? ` (${counts.going})`     : ""}`, `${base}?start=rsvp_${eventId}_yes`)
-    .url(`🤔 Interested${counts.maybe ? ` (${counts.maybe})` : ""}`, `${base}?start=rsvp_${eventId}_interested`);
-  if (ticketCount) {
+    .url(`✅ Going${counts.going ? ` (${counts.going})` : ""}`, `${miniAppUrl}&rsvp=going`)
+    .url(`🤔 Interested${counts.maybe ? ` (${counts.maybe})` : ""}`, `${miniAppUrl}&rsvp=maybe`);
+
+  if (ticketCount && BOT_USERNAME) {
+    const base = `https://t.me/${BOT_USERNAME}`;
     kb.row().url(`🎟 ${ticketCount} ticket${ticketCount !== 1 ? "s" : ""} sold — see list`, `${base}?start=buyers_${eventId}`);
   }
   return kb;
@@ -697,10 +700,8 @@ function buildRsvpStatusFooter(
  */
 function stripRsvpFooter(text: string): string {
   // Remove the RSVP counts block (starts with a blank line then ✅/🤔/🎟/_you)
-  // AND the inline RSVP link line at the very end of the card
   return text
     .replace(/\n\n(?:[✅🤔🎟]|_you)[\s\S]*$/, "")
-    .replace(/\n\[✅[^\]]*\][\s\S]*$/, "")   // strips the [✅ I'm going]... line
     .trimEnd();
 }
 
@@ -710,20 +711,21 @@ function buildPreviewCardText(event: EventData): string {
   const icon    = CATEGORY_ICONS[event.category] ?? "📌";
   const dateStr = safeMoscowStr(event.date);
   const desc    = (event.description ?? "").slice(0, 180);
-  // Embed RSVP deep-links directly in the card text so they survive message forwarding.
-  // Telegram strips inline keyboards on forward — in-text links do not get stripped.
-  const base = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}` : null;
-  const rsvpLine = base
-    ? `[✅ I'm going](${base}?start=rsvp_${event.id}_yes)  ·  [🤔 Interested](${base}?start=rsvp_${event.id}_interested)`
-    : `[View & RSVP →](https://expatevents.org/events/${event.id})`;
+
+  // When the card is FORWARDED, inline keyboards are stripped by Telegram.
+  // We embed a "View event" link directly in the text — it survives forwarding.
+  // Users tap it to open the mini-app where they can RSVP with the ✅/🤔 buttons.
+  const miniAppUrl = BOT_USERNAME
+    ? `https://t.me/${BOT_USERNAME}/app?startapp=event_${event.id}`
+    : `https://expatevents.org/events/${event.id}`;
+
   return (
     `${icon} *${event.title}*\n\n` +
     `📅 ${dateStr}\n` +
     `📍 ${event.locationName || event.venueAddress}, ${event.venueCity}\n` +
     `🏷 ${getCategoryLabel(event.category)}\n\n` +
     (desc ? `${desc}${(event.description ?? "").length > 180 ? "…" : ""}\n\n` : "") +
-    `[View event →](https://expatevents.org/events/${event.id})\n` +
-    rsvpLine
+    `[👀 View event & RSVP →](${miniAppUrl})`
   );
 }
 
@@ -1659,7 +1661,7 @@ const rsvpFlushTimers = new Map<number, { count: number; timer: ReturnType<typeo
 const RSVP_DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes
 const RSVP_MILESTONES  = new Set([1, 5, 10, 25, 50, 100]);
 
-async function notifyOrganiserRsvp(
+export async function notifyOrganiserRsvp(
   eventId: number,
   status: "going" | "maybe",
   counts: { going: number; maybe: number; no: number },

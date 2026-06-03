@@ -241,6 +241,37 @@ export function registerNotifyRoutes(app: Express) {
     }
   });
 
+  // ── POST /api/notify/rsvp ─────────────────────────────────────────────────
+  // Called by Event-Hub when a user RSVPs via the web/mini-app.
+  // Triggers the bot to notify the event organiser.
+  // Body: { eventId, userId, status, going, maybe }
+  app.post("/api/notify/rsvp", async (req, res) => {
+    if (!validateServiceSecret(req, res)) return;
+
+    const { eventId, userId, status, going = 0, maybe = 0 } = req.body;
+    if (!eventId || !userId || !status) {
+      return res.status(400).json({ error: "eventId, userId, status are required" });
+    }
+
+    try {
+      // Fire the organiser notification via the bot (non-blocking)
+      const { notifyOrganiserRsvp } = await import("./bot");
+      const counts = { going: Number(going), maybe: Number(maybe), no: 0 };
+      notifyOrganiserRsvp(
+        Number(eventId),
+        status === "going" ? "going" : "maybe",
+        counts,
+        { count: 0, buyers: [] },
+      ).catch((err: any) => console.warn("[notify/rsvp] organiser notify failed:", err?.message));
+
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("[POST /api/notify/rsvp]", err);
+      res.status(500).json({ error: err.message ?? "Failed to trigger RSVP notification" });
+    }
+  });
+
+
   // ── GET /api/admin/telegram-stats ─────────────────────────────────────────
   // How many users have Telegram connected, breakdown by interest.
   app.get("/api/admin/telegram-stats", requireAdmin, async (req, res) => {
