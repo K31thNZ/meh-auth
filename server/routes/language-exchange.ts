@@ -33,6 +33,7 @@ const PUBLIC_FIELDS = {
   meetingTypes:     users.meetingTypes,
   bio:              users.bio,
   telegramUsername: users.telegramUsername,
+  leHidden:         users.leHidden,
 } as const;
 
 router.get("/users", async (req: Request, res: Response) => {
@@ -58,12 +59,8 @@ router.get("/users", async (req: Request, res: Response) => {
       .where(isNotNull(users.nativeLanguage))
       .limit(500); // fetch generous pool then filter in JS (avoids complex jsonb SQL)
 
-    // Filter: blocked users never appear
-    rows = rows.filter(u => {
-      // @ts-ignore — blocked is on the users table but not in PUBLIC_FIELDS select
-      // We re-query with blocked check below; this cast is safe
-      return true;
-    });
+    // Filter: hidden-by-admin users never appear in public listing
+    rows = rows.filter(u => !u.leHidden);
 
     // Filter: language — matches native OR any learning language code
     if (language) {

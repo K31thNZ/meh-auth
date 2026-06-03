@@ -14,7 +14,7 @@ import pg from "pg";
 import { hashPassword, comparePasswords, setupPassport, registerAuthRoutes } from "./auth";
 import { db } from "./db";
 import { users } from "@shared/schema";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, isNotNull, desc } from "drizzle-orm";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -777,6 +777,72 @@ if (process.env.WEBHOOK_URL) {
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────
+
+// ── GET /api/admin/language-exchange/users ────────────────────────────────
+// Returns all users who have set a native language, with hidden status.
+app.get("/api/admin/language-exchange/users", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const rows = await db
+      .select({
+        id:               users.id,
+        displayName:      users.displayName,
+        avatarUrl:        users.avatarUrl,
+        city:             users.city,
+        myAgeGroup:       users.myAgeGroup,
+        nativeLanguage:   users.nativeLanguage,
+        learningLanguages:users.learningLanguages,
+        bio:              users.bio,
+        telegramUsername: users.telegramUsername,
+        leHidden:         users.leHidden,
+        blocked:          users.blocked,
+        createdAt:        users.createdAt,
+      })
+      .from(users)
+      .where(isNotNull(users.nativeLanguage))
+      .orderBy(desc(users.createdAt));
+
+    return res.json(rows.map(u => ({
+      id:                u.id,
+      display_name:      u.displayName ?? "Anonymous",
+      avatar_url:        u.avatarUrl ?? "",
+      city:              u.city ?? "",
+      age_group:         u.myAgeGroup ?? "",
+      native_language:   u.nativeLanguage ?? "",
+      learning_languages:Array.isArray(u.learningLanguages) ? u.learningLanguages : [],
+      bio:               u.bio ?? "",
+      telegram_username: u.telegramUsername ?? null,
+      le_hidden:         u.leHidden,
+      blocked:           u.blocked,
+      created_at:        u.createdAt,
+    })));
+  } catch (err) {
+    console.error("[admin] GET /language-exchange/users error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── PATCH /api/admin/language-exchange/users/:id/hidden ───────────────────
+// Toggle the le_hidden flag — hides/shows a user's Language Exchange card.
+app.patch("/api/admin/language-exchange/users/:id/hidden", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+  const userId = parseInt(req.params.id, 10);
+  const { hidden } = req.body as { hidden: boolean };
+  if (isNaN(userId) || typeof hidden !== "boolean") {
+    return res.status(400).json({ error: "Invalid payload" });
+  }
+  try {
+    await db
+      .update(users)
+      .set({ leHidden: hidden })
+      .where(eq(users.id, userId));
+    return res.json({ ok: true, id: userId, le_hidden: hidden });
+  } catch (err) {
+    console.error("[admin] PATCH /language-exchange/users/:id/hidden error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[meh-auth] Running on port ${PORT} (${process.env.NODE_ENV ?? "development"})`);
   console.log(`[meh-auth] Cookie domain: ${process.env.COOKIE_DOMAIN ?? "not set"}`);

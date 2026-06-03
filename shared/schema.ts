@@ -48,6 +48,7 @@ export const users = pgTable("users", {
 
   // ── Bot‑related flags ─────────────────────────────────────────────────────
   blocked:         boolean("blocked").notNull().default(false),
+  leHidden:        boolean("le_hidden").notNull().default(false),  // admin-hidden from language exchange
   language:        text("language").notNull().default("en"),
   telegramUsername: text("telegram_username"),
 });
