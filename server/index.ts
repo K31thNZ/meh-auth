@@ -843,6 +843,58 @@ app.patch("/api/admin/language-exchange/users/:id/hidden", async (req: any, res:
   }
 });
 
+
+// ── GET /api/users/:id/public ─────────────────────────────────────────────────
+// Returns safe public profile fields for any user.
+// Protected by SERVICE_SECRET so only trusted services (Event-Hub) can call it.
+app.get("/api/users/:id/public", async (req: any, res: any) => {
+  if (!isAdminOrService(req)) return res.status(403).json({ error: "Forbidden" });
+
+  const userId = parseInt(req.params.id, 10);
+  if (isNaN(userId)) return res.status(400).json({ error: "Invalid user ID" });
+
+  try {
+    const [u] = await db
+      .select({
+        id:               users.id,
+        displayName:      users.displayName,
+        avatarUrl:        users.avatarUrl,
+        city:             users.city,
+        bio:              users.bio,
+        myAgeGroup:       users.myAgeGroup,
+        nativeLanguage:   users.nativeLanguage,
+        learningLanguages: users.learningLanguages,
+        interests:        users.interests,
+        meetingTypes:     users.meetingTypes,
+        telegramUsername: users.telegramUsername,
+        isExpatMember:    users.isExpatMember,
+        isGamesMember:    users.isGamesMember,
+      })
+      .from(users)
+      .where(eq(users.id, userId));
+
+    if (!u) return res.status(404).json({ error: "User not found" });
+
+    res.json({
+      id:               u.id,
+      displayName:      u.displayName,
+      avatarUrl:        u.avatarUrl,
+      city:             u.city,
+      bio:              u.bio,
+      ageGroup:         u.myAgeGroup,
+      native:           u.nativeLanguage ? [u.nativeLanguage] : [],
+      learning:         Array.isArray(u.learningLanguages) ? u.learningLanguages : [],
+      interests:        Array.isArray(u.interests) ? u.interests : [],
+      meetingTypes:     Array.isArray(u.meetingTypes) ? u.meetingTypes : [],
+      telegramUsername: u.telegramUsername,
+      isExpatMember:    u.isExpatMember,
+      isGamesMember:    u.isGamesMember,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[meh-auth] Running on port ${PORT} (${process.env.NODE_ENV ?? "development"})`);
   console.log(`[meh-auth] Cookie domain: ${process.env.COOKIE_DOMAIN ?? "not set"}`);
