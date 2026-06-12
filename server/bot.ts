@@ -456,6 +456,14 @@ function enqueueNotification(n: typeof notificationQueue[number]): void {
 
 export const bot = new Bot<BotContext>(process.env.TELEGRAM_BOT_TOKEN!);
 const rsvpCooldown = new Map<string, number>();
+// A4 fix: periodic TTL prune so the map can't grow unboundedly between taps.
+// Runs every 60 s and evicts entries older than the 10-second cooldown window.
+setInterval(() => {
+  const cutoff = Date.now() - 10_000;
+  for (const [k, v] of rsvpCooldown) {
+    if (v < cutoff) rsvpCooldown.delete(k);
+  }
+}, 60_000).unref();
 
 bot.use(session({ initial: () => ({} as SessionData) }));
 
@@ -489,30 +497,45 @@ bot.command("start", async (ctx) => {
       return;
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // ⚠️  FIXED: Wrap RSVP with try/catch to surface failures
-    // ════════════════════════════════════════════════════════════════════════
+    // A2 fix: fetch current status first so the deep-link toggles (same as Path A callback)
+    let currentStatus: string | null = null;
+    try {
+      const curRes = await fetchWithTimeout(
+        `${EXPAT_API_URL}/api/bot/events/${eventId}/my-rsvp`,
+        { headers: { "X-Bot-Secret": EXPAT_API_SECRET, "X-User-Id": String(existingUser.id) } },
+      );
+      if (curRes.ok) currentStatus = (await curRes.json()).status ?? null;
+    } catch { /* non-fatal — treat as no existing status */ }
+
+    const newStatus = currentStatus === status ? "none" : status;
+
     try {
       const [counts, ticketData] = await Promise.all([
-        setRsvpStatus(existingUser.id, eventId, status, 0, undefined),
+        setRsvpStatus(existingUser.id, eventId, newStatus, 0, undefined),
         loadTicketBuyers(eventId),
       ]);
 
-      const label  = status === "going" ? "✅ You're going!" : "🤔 You're marked as interested!";
-      const footer = buildRsvpStatusFooter(counts, ticketData, status);
+      const label = newStatus === "none"
+        ? "↩️ RSVP removed."
+        : newStatus === "going"
+          ? "✅ You're going!"
+          : "🤔 You're marked as interested!";
+      const footer = buildRsvpStatusFooter(counts, ticketData, newStatus === "none" ? undefined : newStatus);
       const eventUrl = `https://expatevents.org/events/${eventId}`;
       await ctx.reply(
         `${label}${footer}\n\n[View event & purchase tickets →](${eventUrl})`,
         { parse_mode: "Markdown" },
       );
 
-      // Notify the organiser (non-blocking)
-      notifyOrganiserRsvp(eventId, status, counts, ticketData).catch(() => {});
+      // Notify the organiser (non-blocking — skip if RSVP was cleared)
+      if (newStatus !== "none") {
+        notifyOrganiserRsvp(eventId, newStatus as "going" | "maybe", counts, ticketData).catch(() => {});
+      }
     } catch (err: any) {
       const detail = err?.message ?? "unknown error";
       console.error(`[bot] RSVP deep-link failed: ${detail}`);
       await ctx.reply(
-        `❌ Sorry, we couldn’t save your RSVP right now.\n\n`
+        `❌ Sorry, we couldn't save your RSVP right now.\n\n`
         + `You can also RSVP on the website: [View event →](https://expatevents.org/events/${eventId})`,
         { parse_mode: "Markdown" },
       );
@@ -932,10 +955,6 @@ bot.callbackQuery(/^rsvp:(going|maybe|no):(\d+)$/, async (ctx) => {
     return;
   }
   rsvpCooldown.set(key, now);
-  // Evict entries older than 10 s to prevent unbounded map growth
-  for (const [k, v] of rsvpCooldown) {
-    if (now - v > 10_000) rsvpCooldown.delete(k);
-  }
 
   const [user] = await db.select({ id: users.id }).from(users).where(eq(users.telegramId, tgId));
   if (!user) {

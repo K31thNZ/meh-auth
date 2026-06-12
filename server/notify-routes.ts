@@ -248,7 +248,9 @@ export function registerNotifyRoutes(app: Express) {
   app.post("/api/notify/rsvp", async (req, res) => {
     if (!validateServiceSecret(req, res)) return;
 
-    const { eventId, userId, status, going = 0, maybe = 0 } = req.body;
+    // A3 fix: ticketCount now forwarded from Event-Hub so the organiser notification
+    //         shows the real ticket count instead of always 0.
+    const { eventId, userId, status, going = 0, maybe = 0, ticketCount = 0 } = req.body;
     if (!eventId || !userId || !status) {
       return res.status(400).json({ error: "eventId, userId, status are required" });
     }
@@ -261,7 +263,7 @@ export function registerNotifyRoutes(app: Express) {
         Number(eventId),
         status === "going" ? "going" : "maybe",
         counts,
-        { count: 0, buyers: [] },
+        { count: Number(ticketCount), buyers: [] },
       ).catch((err: any) => console.warn("[notify/rsvp] organiser notify failed:", err?.message));
 
       res.json({ ok: true });
