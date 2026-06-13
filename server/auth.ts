@@ -1,3 +1,4 @@
+import { users } from "@shared/schema";
 // server/auth.ts
 // All authentication strategies for ExpatEvents.org.
 // Google, Yandex, magic code, local username/password.
@@ -15,6 +16,7 @@ import { runIncrementalMatcher } from "./matcher";
 import { sendToUser } from "./bot";
 import type { Express, Request, Response, NextFunction } from "express";
 import { db } from "./db";
+import { eq } from "drizzle-orm";
 import { telegramLinkTokens } from "@shared/schema";
 
 const scryptAsync = promisify(scrypt);
@@ -131,6 +133,17 @@ export function requireAdmin(req: any, res: any, next: any) {
 export function registerAuthRoutes(app: Express) {
   app.use(passport.initialize());
   app.use(passport.session());
+
+  // Bump last_seen_at for any authenticated request (non-blocking)
+  app.use((req: any, _res: any, next: any) => {
+    if (req.user?.id) {
+      db.update(users)
+        .set({ lastSeenAt: new Date() })
+        .where(eq(users.id, req.user.id))
+        .catch(() => {/* non-fatal */});
+    }
+    next();
+  });
 
   // ── Current user ──────────────────────────────────────────────────────────
   app.get("/api/user", (req, res) => {

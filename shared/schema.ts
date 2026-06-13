@@ -34,6 +34,7 @@ export const users = pgTable("users", {
   isGamesMember:  boolean("is_games_member").notNull().default(false),
   dice:        integer("dice").notNull().default(0),
   createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
+  lastSeenAt:  timestamp("last_seen_at", { withTimezone: true }),
 
   // ── Phase 1: Smart Match profile ─────────────────────────────────────────
   nativeLanguage:    text("native_language"),
@@ -109,6 +110,7 @@ export const hosts = pgTable("hosts", {
   approvedAt:  timestamp("approved_at", { withTimezone: true }),
   approvedBy:  integer("approved_by").references(() => users.id, { onDelete: "set null" }),
   createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
+  lastSeenAt:  timestamp("last_seen_at", { withTimezone: true }),
 });
 
 export const hostApplications = pgTable("host_applications", {
@@ -150,6 +152,7 @@ export const events = pgTable("events", {
   notificationsSent: integer("notifications_sent").notNull().default(0),
   rsvpMomentum24h:   integer("rsvp_momentum_24h").notNull().default(0),   // RSVPs in last 24h
   createdAt:   timestamp("created_at", { withTimezone: true }).defaultNow(),
+  lastSeenAt:  timestamp("last_seen_at", { withTimezone: true }),
 });
 
 // ── Demand signal suppression (per organiser) ────────────────────────────────

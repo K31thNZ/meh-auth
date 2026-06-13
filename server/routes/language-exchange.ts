@@ -15,7 +15,7 @@
 
 import { Router, Request, Response } from "express";
 import { db } from "../db";
-import { users } from "@shared/schema";
+import { users, availabilitySlots } from "@shared/schema";
 import { isNotNull, sql, eq } from "drizzle-orm";
 
 const router = Router();
@@ -34,6 +34,7 @@ const PUBLIC_FIELDS = {
   bio:              users.bio,
   telegramUsername: users.telegramUsername,
   leHidden:         users.leHidden,
+  lastSeenAt:       users.lastSeenAt,     // Task 4
 } as const;
 
 router.get("/users", async (req: Request, res: Response) => {
@@ -115,7 +116,8 @@ router.get("/users", async (req: Request, res: Response) => {
       interests:        Array.isArray(u.interests)         ? u.interests         : [],
       meeting_types:    Array.isArray(u.meetingTypes)      ? u.meetingTypes      : [],
       bio:              u.bio ?? "",
-      telegram_username:u.telegramUsername ?? null,
+      telegram_username: u.telegramUsername ?? null,
+      last_seen_at:      u.lastSeenAt ? u.lastSeenAt.toISOString() : null,  // Task 4
     }));
 
     return res.json({ data, total, limit, offset });
@@ -135,9 +137,16 @@ router.post("/spark", async (req: Request, res: Response) => {
   const currentUser = (req as any).user;
   if (!currentUser) return res.status(401).json({ error: "Not authenticated" });
 
-  const { recipientId, availableTimes } = req.body as {
-    recipientId: number;
+  const { recipientId, availableTimes, suggestedEvent } = req.body as {
+    recipientId:     number;
     availableTimes?: string[];   // ISO strings of suggested slots (optional)
+    suggestedEvent?: {           // Task 2 — event suggestion from SuggestEventDialog
+      id:    number;
+      title: string;
+      date:  string;
+      city:  string;
+      url:   string;
+    } | null;
   };
 
   if (!recipientId || isNaN(Number(recipientId))) {
@@ -203,7 +212,20 @@ router.post("/spark", async (req: Request, res: Response) => {
       return "\n\n🕐 *Suggested times (Moscow):*\n" + formatted.map(t => `  • ${t}`).join("\n");
     }
 
-    const timesStr = formatTimes(availableTimes);
+    // ── Format suggested event (Task 2) ────────────────────────────────────
+    function formatEvent(ev: typeof suggestedEvent): string {
+      if (!ev) return "";
+      try {
+        const dateStr = new Intl.DateTimeFormat("en-GB", {
+          weekday: "short", day: "numeric", month: "short",
+          hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow",
+        }).format(new Date(ev.date));
+        return `\n\n📅 *Suggested event:*\n[${ev.title}](${ev.url})\n${dateStr}${ev.city ? ` · ${ev.city}` : ""}`;
+      } catch { return ""; }
+    }
+
+    const timesStr    = formatTimes(availableTimes);
+    const eventStr    = formatEvent(suggestedEvent);
     const senderProfile  = profileSummary(s);
     const botUsername = process.env.BOT_USERNAME ?? "expatevents_bot";
 
@@ -215,6 +237,7 @@ router.post("/spark", async (req: Request, res: Response) => {
       ``,
       senderProfile,
       timesStr,
+      eventStr,           // Task 2 — suggested event block
       ``,
       `${s.telegramUsername ? `💬 Reply to them: @${s.telegramUsername}` : `📲 [Open the app to connect](https://expatevents.org/language-exchange)`}`,
       ``,
@@ -227,6 +250,7 @@ router.post("/spark", async (req: Request, res: Response) => {
       ``,
       profileSummary(r),
       timesStr,
+      eventStr,           // Task 2
       ``,
       r.telegramUsername
         ? `💬 You can also message them directly: @${r.telegramUsername}`
@@ -260,6 +284,29 @@ router.post("/spark", async (req: Request, res: Response) => {
 
   } catch (err) {
     console.error("[language-exchange] POST /spark error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── GET /api/language-exchange/users/:id/availability ─────────────────────────
+// Task 3 (Spec Batch 1): Returns public availability slots for a given user so
+// the Spark dialog can show a read-only heat-map of "when this person is free."
+// Auth required (to prevent public enumeration), but any authenticated user can
+// query any other user's slots.
+
+router.get("/users/:id/availability", requireAuth, async (req, res) => {
+  try {
+    const targetId = parseInt(req.params.id, 10);
+    if (isNaN(targetId)) return res.status(400).json({ error: "Invalid user id" });
+
+    const slots = await db
+      .select({ day: availabilitySlots.day, hour: availabilitySlots.hour })
+      .from(availabilitySlots)
+      .where(eq(availabilitySlots.userId, targetId));
+
+    return res.json({ slots });
+  } catch (err) {
+    console.error("[language-exchange] GET /users/:id/availability error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
