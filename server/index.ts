@@ -869,6 +869,7 @@ app.get("/api/users/:id/public", async (req: any, res: any) => {
         telegramUsername: users.telegramUsername,
         isExpatMember:    users.isExpatMember,
         isGamesMember:    users.isGamesMember,
+        languageStory:    users.languageStory,   // Task 6
       })
       .from(users)
       .where(eq(users.id, userId));
@@ -889,6 +890,7 @@ app.get("/api/users/:id/public", async (req: any, res: any) => {
       telegramUsername: u.telegramUsername,
       isExpatMember:    u.isExpatMember,
       isGamesMember:    u.isGamesMember,
+      language_story:   u.languageStory ?? null,  // Task 6
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

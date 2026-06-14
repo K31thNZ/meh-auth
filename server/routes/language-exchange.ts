@@ -35,6 +35,7 @@ const PUBLIC_FIELDS = {
   telegramUsername: users.telegramUsername,
   leHidden:         users.leHidden,
   lastSeenAt:       users.lastSeenAt,     // Task 4
+  languageStory:    users.languageStory,  // Task 6
 } as const;
 
 router.get("/users", async (req: Request, res: Response) => {
@@ -118,6 +119,7 @@ router.get("/users", async (req: Request, res: Response) => {
       bio:              u.bio ?? "",
       telegram_username: u.telegramUsername ?? null,
       last_seen_at:      u.lastSeenAt ? u.lastSeenAt.toISOString() : null,  // Task 4
+      language_story:    u.languageStory ?? null,                           // Task 6
     }));
 
     return res.json({ data, total, limit, offset });
@@ -291,10 +293,10 @@ router.post("/spark", async (req: Request, res: Response) => {
 // ── GET /api/language-exchange/users/:id/availability ─────────────────────────
 // Task 3 (Spec Batch 1): Returns public availability slots for a given user so
 // the Spark dialog can show a read-only heat-map of "when this person is free."
-// Auth required (to prevent public enumeration), but any authenticated user can
-// query any other user's slots.
+// Task 8 (Spec Batch 2): No auth required — also rendered on the public profile
+// page which is visible to unauthenticated visitors.
 
-router.get("/users/:id/availability", requireAuth, async (req, res) => {
+router.get("/users/:id/availability", async (req, res) => {
   try {
     const targetId = parseInt(req.params.id, 10);
     if (isNaN(targetId)) return res.status(400).json({ error: "Invalid user id" });

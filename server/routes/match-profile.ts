@@ -64,6 +64,7 @@ router.get("/match-profile", requireAuth, async (req: Request, res: Response) =>
         myAgeGroup:        users.myAgeGroup,
         preferredAgeMin:   users.preferredAgeMin,
         preferredAgeMax:   users.preferredAgeMax,
+        languageStory:     users.languageStory,   // Task 6
       })
       .from(users)
       .where(eq(users.id, userId));
@@ -80,6 +81,7 @@ router.get("/match-profile", requireAuth, async (req: Request, res: Response) =>
       myAgeGroup:        row.myAgeGroup        ?? null,
       preferredAgeMin:   row.preferredAgeMin   ?? 0,
       preferredAgeMax:   row.preferredAgeMax   ?? 3,
+      languageStory:     row.languageStory      ?? null,  // Task 6
     });
   } catch (err) {
     console.error("[match-profile] GET error:", err);
@@ -92,7 +94,7 @@ router.get("/match-profile", requireAuth, async (req: Request, res: Response) =>
 router.patch("/match-profile", requireAuth, async (req: Request, res: Response) => {
   try {
     const userId = (req.user as { id: number }).id;
-    const { nativeLanguage, learningLanguages, metroStation, bio, city, meetingTypes, myAgeGroup, preferredAgeMin, preferredAgeMax } = req.body;
+    const { nativeLanguage, learningLanguages, metroStation, bio, city, meetingTypes, myAgeGroup, preferredAgeMin, preferredAgeMax, languageStory } = req.body;
 
     // Build only the fields the client sent — undefined fields are left unchanged
     const patch: Partial<{
@@ -105,6 +107,7 @@ router.patch("/match-profile", requireAuth, async (req: Request, res: Response) 
       myAgeGroup:        string | null;
       preferredAgeMin:   number;
       preferredAgeMax:   number;
+      languageStory:     string | null;  // Task 6
     }> = {};
 
     // --- nativeLanguage ---
@@ -219,6 +222,17 @@ router.patch("/match-profile", requireAuth, async (req: Request, res: Response) 
         return res.status(400).json({ error: "preferredAgeMax must be 0–3" });
       }
       patch.preferredAgeMax = v;
+    }
+
+    // --- languageStory (Task 6) ---
+    if (languageStory !== undefined) {
+      if (languageStory === null || languageStory === "") {
+        (patch as any).languageStory = null;
+      } else if (typeof languageStory !== "string") {
+        return res.status(400).json({ error: "languageStory must be a string" });
+      } else {
+        (patch as any).languageStory = languageStory.trim().slice(0, 140);
+      }
     }
 
     // Nothing to update
