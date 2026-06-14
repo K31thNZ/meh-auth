@@ -24,6 +24,35 @@ function requireAuth(req: Request, res: Response, next: Function) {
   next();
 }
 
+// ── Event Regular cache (Task 12) ────────────────────────────────────────────
+// Calls Event-Hub once per user per hour to check attended RSVP count.
+// Map: userId → { result: boolean, expiresAt: number }
+const EXPAT_API_URL    = (process.env.EXPAT_API_URL ?? "https://expatevents.org").replace(/\/$/, "");
+const EXPAT_API_SECRET = process.env.EXPAT_API_SECRET ?? "";
+const eventRegularCache = new Map<number, { result: boolean; expiresAt: number }>();
+
+async function isEventRegular(userId: number): Promise<boolean> {
+  const cached = eventRegularCache.get(userId);
+  if (cached && Date.now() < cached.expiresAt) return cached.result;
+
+  try {
+    const res = await fetch(
+      `${EXPAT_API_URL}/api/bot/events/attended-count?userId=${userId}`,
+      { headers: { "x-bot-secret": EXPAT_API_SECRET }, signal: AbortSignal.timeout(3000) },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { count } = await res.json() as { count: number };
+    const result = count >= 1;
+    eventRegularCache.set(userId, { result, expiresAt: Date.now() + 60 * 60 * 1000 });
+    return result;
+  } catch (err) {
+    // On error, default to false and cache for 5 min to avoid hammering Event-Hub
+    console.warn(`[language-exchange] isEventRegular(${userId}) failed:`, (err as Error).message);
+    eventRegularCache.set(userId, { result: false, expiresAt: Date.now() + 5 * 60 * 1000 });
+    return false;
+  }
+}
+
 const router = Router();
 
 // Only these fields are exposed publicly — no emails, passwords, OAuth IDs, etc.
@@ -111,8 +140,8 @@ router.get("/users", async (req: Request, res: Response) => {
     // Paginate
     const page = rows.slice(offset, offset + limit);
 
-    // Shape the response — never expose nulls for arrays
-    const data = page.map(u => ({
+    // Shape the response — enrich with Event Regular badge (Task 12)
+    const data = await Promise.all(page.map(async u => ({
       id:               u.id,
       full_name:        u.displayName ?? "Anonymous",
       avatar_url:       u.avatarUrl   ?? "",
@@ -126,7 +155,8 @@ router.get("/users", async (req: Request, res: Response) => {
       telegram_username: u.telegramUsername ?? null,
       last_seen_at:      u.lastSeenAt ? u.lastSeenAt.toISOString() : null,  // Task 4
       language_story:    u.languageStory ?? null,                           // Task 6
-    }));
+      is_event_regular:  await isEventRegular(u.id),                        // Task 12
+    })));
 
     return res.json({ data, total, limit, offset });
   } catch (err) {
