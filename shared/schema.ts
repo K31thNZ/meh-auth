@@ -180,6 +180,20 @@ export const rsvpFlushBuffer = pgTable("rsvp_flush_buffer", {
   lastPendingAt:  timestamp("last_pending_at",  { withTimezone: true }).notNull(),
 });
 
+
+// ── Language Posts (Moments feed — Task 9) ───────────────────────────────────
+
+export const languagePosts = pgTable("language_posts", {
+  id:          serial("id").primaryKey(),
+  userId:      integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  text:        text("text").notNull(),
+  language:    text("language").notNull(),
+  likes:       integer("likes").array().notNull().default(sql`'{}'::integer[]`),
+  corrections: jsonb("corrections").notNull().default(sql`'[]'::jsonb`),
+  expiresAt:   timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ── Relations ────────────────────────────────────────────────────────────────
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -188,6 +202,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   hosts:               many(hosts),
   telegramLinkTokens:  many(telegramLinkTokens),
   organisedEvents:     many(events, { relationName: "organiser" }),
+  languagePosts:       many(languagePosts),  // Task 9
 }));
 
 export const availabilitySlotsRelations = relations(availabilitySlots, ({ one }) => ({
@@ -219,6 +234,10 @@ export const eventsRelations = relations(events, ({ one }) => ({
   }),
 }));
 
+export const languagePostsRelations = relations(languagePosts, ({ one }) => ({
+  user: one(users, { fields: [languagePosts.userId], references: [users.id] }),
+}));
+
 // ── Inferred types ────────────────────────────────────────────────────────────
 
 export type User              = typeof users.$inferSelect;
@@ -229,3 +248,4 @@ export type HostApplication   = typeof hostApplications.$inferSelect;
 export type TelegramLinkToken = typeof telegramLinkTokens.$inferSelect;
 export type PendingApproval   = typeof pendingApprovals.$inferSelect;
 export type Event             = typeof events.$inferSelect;
+export type LanguagePost      = typeof languagePosts.$inferSelect;  // Task 9
