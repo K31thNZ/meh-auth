@@ -1,7 +1,7 @@
 // server/index.ts
 import { registerTelegramLinkRoutes } from "./telegram-link";
 import { registerMagicCodeRoutes } from "./magic-code";
-import { bot, sendToUser } from "./bot";   // grammy bot instance (auto-started)
+import { bot, botReady, sendToUser } from "./bot";   // grammy bot instance (auto-started)
 import { scheduleMatcher, runAvailabilityMatcher } from "./matcher";
 import { registerNotifyRoutes } from "./notify-routes";
 import matchProfileRouter from "./routes/match-profile";
@@ -766,6 +766,16 @@ const webhookPath = "/telegram";
 if (process.env.WEBHOOK_URL) {
   app.post(webhookPath, async (req, res) => {
     try {
+      // Wait for bot.init() to complete before touching the bot — on Render's
+      // free tier the service cold-starts on each request after idle, so a
+      // webhook POST can otherwise arrive before botInfo is set.
+      await botReady;
+      if (!bot.isInited()) {
+        // Init failed (e.g. Telegram API unreachable at startup). Tell
+        // Telegram to retry — it will redeliver this update shortly.
+        console.error("[webhook] Bot still not initialized after botReady resolved");
+        return res.sendStatus(503);
+      }
       await bot.handleUpdate(req.body);
       res.sendStatus(200);
     } catch (err) {

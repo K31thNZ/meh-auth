@@ -2065,4 +2065,15 @@ async function startBot(): Promise<void> {
   }
 }
 
-startBot();
+// ── Readiness promise ──────────────────────────────────────────────────────────
+// On Render's free tier the service spins down on idle and cold-starts on the
+// next incoming request. bot.init() makes a network round-trip to Telegram's
+// API to fetch botInfo, so a webhook POST can arrive and be routed to Express
+// before that call resolves — grammY then throws "Bot not initialized!" on
+// bot.handleUpdate(). Exporting this promise lets the webhook route `await`
+// it before touching the bot, eliminating the race instead of hoping init
+// finishes first. .catch() also prevents an unhandled rejection from crashing
+// the whole process if Telegram's API is briefly unreachable on startup.
+export const botReady: Promise<void> = startBot().catch(err => {
+  console.error("[bot] Failed to initialize:", err?.message ?? err);
+});
