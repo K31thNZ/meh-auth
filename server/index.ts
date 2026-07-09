@@ -778,23 +778,27 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 const webhookPath = "/telegram";
 if (process.env.WEBHOOK_URL) {
   app.post(webhookPath, (req, res) => {
-    // Respond 200 immediately — Telegram has a strict read timeout (~5s).
-    // On Render free-tier cold starts, bot.init() can take several seconds,
-    // which caused every cold-start webhook to time out and be redelivered.
-    // We ack first, then process the update in the background so Telegram
-    // never sees a timeout regardless of init latency.
     res.sendStatus(200);
-
     const body = req.body;
-    botReady.then(() => {
+
+    (async () => {
+      // If bot failed to init at startup, retry once before handling the update.
       if (!bot.isInited()) {
-        console.error("[webhook] Bot still not initialized after botReady resolved — dropping update");
-        return;
+        console.warn("[webhook] Bot not inited — attempting lazy init");
+        try {
+          await bot.init();
+          console.log("[webhook] Lazy init succeeded — bot @" + bot.botInfo.username);
+        } catch (initErr: any) {
+          console.error("[webhook] Lazy init failed:", initErr?.message ?? initErr);
+          return;
+        }
       }
-      return bot.handleUpdate(body);
-    }).catch(err => {
-      console.error("[webhook] Error handling update:", err);
-    });
+      try {
+        await bot.handleUpdate(body);
+      } catch (err) {
+        console.error("[webhook] Error handling update:", err);
+      }
+    })();
   });
   console.log(`[meh-auth] Webhook endpoint ready at ${webhookPath}`);
 }
