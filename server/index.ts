@@ -78,6 +78,19 @@ app.get("/health", (_req, res) => res.json({
   env: process.env.NODE_ENV,
 }));
 
+app.get("/debug/bot", (_req, res) => {
+  const { bot } = require("./bot");
+  res.json({
+    webhook_url_env: process.env.WEBHOOK_URL ?? null,
+    telegram_bot_name: process.env.TELEGRAM_BOT_NAME ?? null,
+    token_prefix: (process.env.TELEGRAM_BOT_TOKEN ?? "").slice(0, 15) + "...",
+    bot_inited: bot.isInited(),
+    bot_username: bot.isInited() ? bot.botInfo.username : null,
+    bot_id: bot.isInited() ? bot.botInfo.id : null,
+  });
+});
+
+
 // ── Shared brand styles ────────────────────────────────────────────────────
 const BRAND_FONT = `<link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
