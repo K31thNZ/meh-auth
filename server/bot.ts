@@ -468,6 +468,13 @@ const HARDCODED_BOT_INFO = {
 };
 export const bot = new Bot<BotContext>(process.env.TELEGRAM_BOT_TOKEN!, {
   botInfo: HARDCODED_BOT_INFO,
+  client: {
+    // Force grammY to use Node's native fetch (available since Node 18).
+    // Fixes: TypeError: Expected signal to be an instanceof AbortSignal
+    // which is caused by grammY's bundled node-fetch conflicting with the
+    // native AbortSignal on Render's Node runtime.
+    fetch: globalThis.fetch,
+  },
 });
 const rsvpCooldown = new Map<string, number>();
 // A4 fix: periodic TTL prune so the map can't grow unboundedly between taps.
