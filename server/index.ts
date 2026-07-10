@@ -78,8 +78,15 @@ app.get("/health", (_req, res) => res.json({
   env: process.env.NODE_ENV,
 }));
 
-app.get("/debug/bot", (_req, res) => {
-  const { bot } = require("./bot");
+app.get("/debug/bot", async (_req, res) => {
+  let initError: string | null = null;
+  if (!bot.isInited()) {
+    try {
+      await bot.init();
+    } catch (e: any) {
+      initError = e?.message ?? String(e);
+    }
+  }
   res.json({
     webhook_url_env: process.env.WEBHOOK_URL ?? null,
     telegram_bot_name: process.env.TELEGRAM_BOT_NAME ?? null,
@@ -87,6 +94,7 @@ app.get("/debug/bot", (_req, res) => {
     bot_inited: bot.isInited(),
     bot_username: bot.isInited() ? bot.botInfo.username : null,
     bot_id: bot.isInited() ? bot.botInfo.id : null,
+    init_error: initError,
   });
 });
 
