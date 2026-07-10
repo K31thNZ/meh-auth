@@ -454,7 +454,21 @@ function enqueueNotification(n: typeof notificationQueue[number]): void {
 
 // ── Bot instance ───────────────────────────────────────────────────────────────
 
-export const bot = new Bot<BotContext>(process.env.TELEGRAM_BOT_TOKEN!);
+// botInfo is hardcoded so bot.isInited() is true immediately on startup —
+// bypassing the bot.init() network call that hangs on Render's free tier.
+// Update this object if the bot token ever changes.
+const HARDCODED_BOT_INFO = {
+  id: 8745167732,
+  is_bot: true as const,
+  first_name: "ExpatEvents",
+  username: "ExpatEvents_bot",
+  can_join_groups: true,
+  can_read_all_group_messages: false,
+  supports_inline_queries: false,
+};
+export const bot = new Bot<BotContext>(process.env.TELEGRAM_BOT_TOKEN!, {
+  botInfo: HARDCODED_BOT_INFO,
+});
 const rsvpCooldown = new Map<string, number>();
 // A4 fix: periodic TTL prune so the map can't grow unboundedly between taps.
 // Runs every 60 s and evicts entries older than the 10-second cooldown window.
@@ -2048,21 +2062,16 @@ async function startBot(): Promise<void> {
     return;
   }
 
+  // botInfo is pre-supplied in the Bot constructor — no bot.init() network call needed.
+  // Render free-tier outbound connections to api.telegram.org hang indefinitely,
+  // so we skip the init round-trip entirely and log the hardcoded identity.
+  console.log(`[bot] Bot @${bot.botInfo.username} ready (hardcoded botInfo, no init call)`);
+
   const webhookUrl = process.env.WEBHOOK_URL;
-
-  await bot.init();
-  console.log(`[bot] Bot @${bot.botInfo.username} initialised`);
-
-  if (webhookUrl) {
-    console.log("[bot] Starting webhook mode on", webhookUrl);
-    await bot.api.setWebhook(`${webhookUrl}/telegram`);
-    console.log(`[bot] Webhook set → ${webhookUrl}/telegram`);
-  } else {
-    console.log("[bot] Starting polling mode");
-    bot.start({
-      onStart: (info) => console.log(`[bot] @${info.username} polling`),
-    });
+  if (!webhookUrl) {
+    console.log("[bot] No WEBHOOK_URL — polling mode not supported on Render, skipping");
   }
+  // Webhook is registered externally (via Telegram API curl) — no setWebhook call needed.
 }
 
 // ── Readiness promise ──────────────────────────────────────────────────────────
