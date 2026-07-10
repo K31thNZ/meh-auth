@@ -79,14 +79,22 @@ app.get("/health", (_req, res) => res.json({
 }));
 
 app.get("/debug/bot", async (_req, res) => {
-  let initError: string | null = null;
-  if (!bot.isInited()) {
-    try {
-      await bot.init();
-    } catch (e: any) {
-      initError = e?.message ?? String(e);
-    }
+  // Test outbound connectivity to Telegram API
+  let telegramReachable = false;
+  let telegramError: string | null = null;
+  let telegramLatencyMs: number | null = null;
+  try {
+    const t0 = Date.now();
+    const r = await Promise.race([
+      fetch("https://api.telegram.org"),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout after 5s")), 5000)),
+    ]) as Response;
+    telegramLatencyMs = Date.now() - t0;
+    telegramReachable = true;
+  } catch (e: any) {
+    telegramError = e?.message ?? String(e);
   }
+
   res.json({
     webhook_url_env: process.env.WEBHOOK_URL ?? null,
     telegram_bot_name: process.env.TELEGRAM_BOT_NAME ?? null,
@@ -94,7 +102,9 @@ app.get("/debug/bot", async (_req, res) => {
     bot_inited: bot.isInited(),
     bot_username: bot.isInited() ? bot.botInfo.username : null,
     bot_id: bot.isInited() ? bot.botInfo.id : null,
-    init_error: initError,
+    telegram_reachable: telegramReachable,
+    telegram_latency_ms: telegramLatencyMs,
+    telegram_error: telegramError,
   });
 });
 
